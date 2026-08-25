@@ -12,6 +12,7 @@ Fields to define here (per PRD):
 
 This state object is what SQLite-backed checkpointing persists between
 graph runs (see app/db/checkpointer.py).
+
 """
 """Typed, checkpoint-friendly state for one RecoverAI case.
 
@@ -130,6 +131,9 @@ class RecoveryState(TypedDict, total=False):
     method: str | None
     cart_id: str | None
     cart_value: float | None
+    funnel_stage_reached: str | None
+    last_activity_at: str | None
+    prior_abandonment_count: int
     invoice_payment_ref: str | None
 
     # Diagnosis and bounded routing.
@@ -140,6 +144,9 @@ class RecoveryState(TypedDict, total=False):
     authorized_action: Action | None
     action_reason: str | None
     escalation_trigger: str | None
+    consent_checked: bool
+    consent_reason: str | None
+    contact_allowed: bool
 
     # Guardrail counters and flags.
     retry_count: int
@@ -164,6 +171,7 @@ class RecoveryState(TypedDict, total=False):
     outcome: CaseOutcome | None
     outcome_reason: str | None
     recovered_amount: float | None
+    execution_result: str | None
     learning_updates: dict[str, Any]
     created_at: str
     updated_at: str
@@ -204,6 +212,9 @@ def new_case_state(
     method: str | None = None,
     cart_id: str | None = None,
     cart_value: float | None = None,
+    funnel_stage_reached: str | None = None,
+    last_activity_at: str | None = None,
+    prior_abandonment_count: int = 0,
     invoice_payment_ref: str | None = None,
     now: datetime | None = None,
 ) -> RecoveryState:
@@ -225,6 +236,9 @@ def new_case_state(
         method=method,
         cart_id=cart_id,
         cart_value=float(cart_value) if cart_value is not None else None,
+        funnel_stage_reached=funnel_stage_reached,
+        last_activity_at=last_activity_at,
+        prior_abandonment_count=max(0, int(prior_abandonment_count)),
         invoice_payment_ref=invoice_payment_ref,
         root_cause_category=None,
         confidence=None,
@@ -233,6 +247,9 @@ def new_case_state(
         authorized_action=None,
         action_reason=None,
         escalation_trigger=None,
+        consent_checked=False,
+        consent_reason=None,
+        contact_allowed=False,
         retry_count=0,
         contact_count=0,
         consent_flag=False,
@@ -251,6 +268,7 @@ def new_case_state(
         outcome=None,
         outcome_reason=None,
         recovered_amount=None,
+        execution_result=None,
         learning_updates={},
         created_at=timestamp,
         updated_at=timestamp,
