@@ -1,0 +1,27 @@
+# --- Orchestration ---
+langgraph
+langchain
+langchain-google-genai
+
+# --- Backend ---
+fastapi
+uvicorn
+
+# --- Database ---
+sqlalchemy
+
+# --- Integrations ---
+razorpay
+twilio
+
+# --- Dashboard ---
+streamlit
+pandas
+
+# --- Utilities ---
+pydantic
+python-dotenv
+pyyaml
+
+# --- Testing ---
+pytest

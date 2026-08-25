@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+*.db
+*.sqlite3
+.streamlit/
+data/synthetic_batches/*.json
+!data/synthetic_batches/.gitkeep
+data/seed/*.json
+!data/seed/.gitkeep
+.venv/
+venv/

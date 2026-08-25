@@ -1,0 +1,11 @@
+-- Revora SQLite schema (PRD Section 11 — Data Model).
+--
+-- Tables to define, one per entity in app/models/:
+--   failure_event, checkout_event, root_cause_classification,
+--   consent_flag, retry_attempt, ptp_record, message,
+--   policy_decision, outcome_event, audit_log_entry
+--
+-- audit_log_entry is append-only: no UPDATE/DELETE statements should
+-- ever target this table.
+--
+-- No table definitions populated yet — skeleton only.

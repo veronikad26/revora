@@ -1,0 +1,39 @@
+# Per-root-cause playbook table (PRD Section 5.2).
+#
+# Consumed by app/graph/nodes/recovery_router.py. Defines, per
+# category: allowed_action, retry_limit, messaging_allowed,
+# escalation_trigger.
+#
+# playbooks:
+#   insufficient_balance:
+#     allowed_action: retry_at_predicted_time
+#     retry_limit: 2
+#     messaging_allowed: true
+#     escalation_trigger: "2 failed retries -> PTP negotiation"
+#   card_expired_invalid:
+#     allowed_action: notify_only
+#     retry_limit: 0
+#     messaging_allowed: true
+#     escalation_trigger: "no response in 5 days -> 1 follow-up, then stop"
+#   risk_fraud_block:
+#     allowed_action: none
+#     retry_limit: 0
+#     messaging_allowed: false
+#     escalation_trigger: "immediate silent flag to risk-ops queue"
+#   overdue_invoice:
+#     allowed_action: negotiate
+#     retry_limit: 0
+#     messaging_allowed: true
+#     escalation_trigger: "2 broken promises or dispute -> human collections"
+#   abandoned_checkout:
+#     allowed_action: single_nudge
+#     retry_limit: 0
+#     messaging_allowed: true
+#     escalation_trigger: "no conversion after 1 nudge -> 1 follow-up, then stop"
+#   technical_unclassified:
+#     allowed_action: single_safe_retry_or_refresh
+#     retry_limit: 1
+#     messaging_allowed: conditional
+#     escalation_trigger: "below confidence threshold -> human review"
+#
+# No implementation yet — skeleton only.

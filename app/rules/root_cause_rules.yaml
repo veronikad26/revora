@@ -1,0 +1,22 @@
+# Root-cause rule table (PRD Section 5 — Root-Cause Taxonomy, reduced).
+#
+# Maps known gateway/bank decline codes to one of six root-cause
+# categories. Consumed by app/graph/nodes/diagnosis.py.
+#
+# Categories:
+#   1. insufficient_balance
+#   2. card_expired_invalid
+#   3. risk_fraud_block
+#   4. overdue_invoice
+#   5. abandoned_checkout   (not code-driven — see abandonment_scorer.py)
+#   6. technical_unclassified
+#
+# rules:
+#   - code: "51"
+#     category: insufficient_balance
+#   - code: "54"
+#     category: card_expired_invalid
+#   - code: "05"
+#     category: risk_fraud_block
+#
+# No entries populated yet — skeleton only.
