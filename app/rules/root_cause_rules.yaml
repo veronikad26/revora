@@ -1,22 +1,184 @@
 # Root-cause rule table (PRD Section 5 — Root-Cause Taxonomy, reduced).
 #
-# Maps known gateway/bank decline codes to one of six root-cause
-# categories. Consumed by app/graph/nodes/diagnosis.py.
+# Source of truth: Razorpay's published error documentation —
+#   - https://razorpay.com/docs/errors/payments/list/
+#   - https://razorpay.com/docs/errors/payments/cards/
+#   - https://razorpay.com/docs/errors/payments/upi/
+#   - https://razorpay.com/docs/errors/common/
+# (fetched 2026-08-25). Replaces the earlier placeholder ISO 8583-style
+# numeric codes, which are not what Razorpay actually returns.
+#
+# MATCH KEY: Razorpay payments carry a top-level `error.code`
+# (BAD_REQUEST_ERROR | GATEWAY_ERROR | SERVER_ERROR — too coarse to be
+# useful on its own) and a granular `error.reason` string (e.g.
+# "insufficient_funds", "card_expired") on the Payment entity /
+# `payment.failed` webhook. `reason` is the actual root-cause signal
+# and is what `rules[].reason` below is matched against. `error_code`
+# and `source` are carried only as metadata for audit/debugging.
+#
+# Consumed by app/graph/nodes/diagnosis.py together with
+# app/rules/confidence_heuristic.py:
+#   - reason found in `rules` below -> exact match -> HIGH confidence
+#   - reason not found                -> falls back to `default_category`
+#                                         at LOW confidence (first-seen /
+#                                         unrecognized pattern)
+#
+# Out of scope for this table: Razorpay's generic API/integration
+# errors (invalid API key, missing parameter, rate limiting, 404s —
+# all also surfaced under BAD_REQUEST_ERROR/SERVER_ERROR per
+# razorpay.com/docs/errors/common/). Those are Revora-side integration
+# failures to be handled by app/integrations/razorpay_client.py's own
+# error handling, not customer payment root causes.
 #
 # Categories:
 #   1. insufficient_balance
 #   2. card_expired_invalid
 #   3. risk_fraud_block
-#   4. overdue_invoice
-#   5. abandoned_checkout   (not code-driven — see abandonment_scorer.py)
-#   6. technical_unclassified
-#
-# rules:
-#   - code: "51"
-#     category: insufficient_balance
-#   - code: "54"
-#     category: card_expired_invalid
-#   - code: "05"
-#     category: risk_fraud_block
-#
-# No entries populated yet — skeleton only.
+#   4. overdue_invoice       (not reason-driven — has no entries here;
+#                              this entry point is detected by a due-date
+#                              check, not a gateway decline reason)
+#   5. abandoned_checkout    (not reason-driven — see abandonment_scorer.py)
+#   6. technical_unclassified (catch-all: timeouts, downtime, ambiguous
+#                              bank declines with no further detail,
+#                              anything not matched below)
+
+default_category: technical_unclassified
+
+rules:
+  # --- 1. insufficient_balance ---
+  - reason: insufficient_funds
+    error_code: GATEWAY_ERROR
+    source: card, upi
+    category: insufficient_balance
+    description: >
+      Customer's bank account/card did not have enough funds to
+      complete the transaction.
+  - reason: transaction_limit_exceeded
+    error_code: GATEWAY_ERROR
+    source: card
+    category: insufficient_balance
+    description: >
+      Customer already reached the maximum transaction limit on their
+      card for the day.
+
+  # --- 2. card_expired_invalid ---
+  - reason: card_expired
+    error_code: GATEWAY_ERROR
+    source: card
+    category: card_expired_invalid
+    description: Customer's card is expired.
+  - reason: card_not_enrolled
+    error_code: GATEWAY_ERROR
+    source: card
+    category: card_expired_invalid
+    description: Card was not activated/enabled by the customer for online transactions.
+  - reason: card_disabled_for_online_payments
+    error_code: GATEWAY_ERROR
+    source: card
+    category: card_expired_invalid
+    description: Card was not enabled by the customer for online transactions.
+  - reason: debit_instrument_inactive
+    error_code: GATEWAY_ERROR
+    source: card
+    category: card_expired_invalid
+    description: Card not activated/enabled by the customer for online transactions.
+  - reason: debit_instrument_blocked
+    error_code: GATEWAY_ERROR
+    source: card
+    category: card_expired_invalid
+    description: Card is blocked, either by the customer or their bank.
+  - reason: incorrect_cvv
+    error_code: BAD_REQUEST_ERROR
+    source: card
+    category: card_expired_invalid
+    description: Customer entered an incorrect CVV.
+  - reason: invalid_vpa
+    error_code: BAD_REQUEST_ERROR
+    source: upi
+    category: card_expired_invalid
+    description: Customer is not a valid/registered user on the UPI app (VPA).
+  - reason: credit_failed
+    error_code: GATEWAY_ERROR
+    source: upi
+    category: card_expired_invalid
+    description: >
+      Customer Bank Account Mismatch — payment used a bank account
+      different from the one registered with the business.
+
+  # --- 3. risk_fraud_block ---
+  - reason: payment_risk_check_failed
+    error_code: GATEWAY_ERROR
+    source: card
+    category: risk_fraud_block
+    description: >
+      Customer's bank declined the payment, explicitly citing it as
+      fraudulent.
+
+  # --- 6. technical_unclassified ---
+  - reason: payment_timed_out
+    error_code: GATEWAY_ERROR
+    source: card, upi
+    category: technical_unclassified
+    description: Customer exceeded the payment processing time limit (typically 10 min).
+  - reason: payment_collect_request_expired
+    error_code: GATEWAY_ERROR
+    source: upi
+    category: technical_unclassified
+    description: UPI collect request expired before the customer acted on it.
+  - reason: gateway_technical_error
+    error_code: GATEWAY_ERROR
+    source: card, upi
+    category: technical_unclassified
+    description: Downtime on Razorpay's partner bank.
+  - reason: bank_technical_error
+    error_code: GATEWAY_ERROR
+    source: card, upi
+    category: technical_unclassified
+    description: Downtime on the customer's own bank / UPI provider.
+  - reason: payment_cancelled
+    error_code: GATEWAY_ERROR
+    source: card, upi
+    category: technical_unclassified
+    description: Customer cancelled the transaction or hit back mid-payment.
+  - reason: authentication_failed
+    error_code: GATEWAY_ERROR
+    source: card
+    category: technical_unclassified
+    description: >
+      Customer entered an incorrect OTP/verification detail or closed
+      the browser during authentication.
+  - reason: card_declined
+    error_code: GATEWAY_ERROR
+    source: card
+    category: technical_unclassified
+    description: >
+      Generic bank decline with no further detail available to
+      Razorpay or the merchant (ambiguous — not assumed fraud).
+  - reason: payment_declined
+    error_code: GATEWAY_ERROR
+    source: upi
+    category: technical_unclassified
+    description: >
+      Funds could not be debited from the customer's account; no
+      further detail available (ambiguous — not assumed fraud).
+  - reason: payment_failed
+    error_code: GATEWAY_ERROR
+    source: card
+    category: technical_unclassified
+    description: >
+      Generic bank decline with no further detail available
+      (ambiguous — not assumed fraud).
+  - reason: vpa_resolution_failed
+    error_code: GATEWAY_ERROR
+    source: upi
+    category: technical_unclassified
+    description: >
+      System-side failure resolving the customer's UPI ID; Razorpay's
+      own guidance is to raise a technical-support ticket.
+  - reason: server_error
+    error_code: SERVER_ERROR
+    source: common
+    category: technical_unclassified
+    description: >
+      Transient, unexpected error on Razorpay's server while
+      processing the request.
