@@ -53,6 +53,9 @@ TWILIO_WHATSAPP_FROM: str = os.getenv("TWILIO_WHATSAPP_FROM", "")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./revora.db")
 
 APP_ENV: str = os.getenv("APP_ENV", "development")
+DRY_RUN: bool = os.getenv("DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "on"}
+HTTP_TIMEOUT_SECONDS: float = float(os.getenv("HTTP_TIMEOUT_SECONDS", "15"))
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 
 def _require_in_production(name: str, value: str) -> None:

@@ -21,6 +21,13 @@ LangGraph can persist it through SQLite checkpointing and resume a case after
 an inbound message or a promised-date event. Nodes should return partial
 updates to this TypedDict rather than mutating state in place.
 """
+"""Typed, checkpoint-friendly state for one RecoverAI case.
+
+The graph state is intentionally composed of JSON-compatible primitives so
+LangGraph can persist it through SQLite checkpointing and resume a case after
+an inbound message or a promised-date event. Nodes should return partial
+updates to this TypedDict rather than mutating state in place.
+"""
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
@@ -122,6 +129,7 @@ class RecoveryState(TypedDict, total=False):
     event_id: str
     event_type: str
     customer_id: str
+    customer_phone: str | None
     channel: str
     amount: float
     currency: str
@@ -167,6 +175,7 @@ class RecoveryState(TypedDict, total=False):
     conversation_history: Annotated[list[ConversationMessage], add]
     last_customer_reply: str | None
     parsed_intent: ParsedIntent | None
+    draft_message: str | None
     audit_trail: Annotated[list[AuditEvent], add]
     outcome: CaseOutcome | None
     outcome_reason: str | None
@@ -227,6 +236,7 @@ def new_case_state(
         event_id=event_id or case_id,
         event_type=event_type or entry_point,
         customer_id=customer_id,
+        customer_phone=None,
         channel=channel,
         amount=float(amount),
         currency=currency,
@@ -264,6 +274,7 @@ def new_case_state(
         conversation_history=[],
         last_customer_reply=None,
         parsed_intent=None,
+        draft_message=None,
         audit_trail=[],
         outcome=None,
         outcome_reason=None,
