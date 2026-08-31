@@ -80,4 +80,3 @@ def compare_conditions(results: dict[str, list[dict[str, Any]]]) -> dict[str, An
 
 
 compute_metrics = summarize_results
-
