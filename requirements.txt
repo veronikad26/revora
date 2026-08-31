@@ -1,5 +1,6 @@
 # --- Orchestration ---
 langgraph
+langgraph-checkpoint-sqlite
 langchain
 langchain-google-genai
 
