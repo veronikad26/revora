@@ -21,13 +21,6 @@ LangGraph can persist it through SQLite checkpointing and resume a case after
 an inbound message or a promised-date event. Nodes should return partial
 updates to this TypedDict rather than mutating state in place.
 """
-"""Typed, checkpoint-friendly state for one RecoverAI case.
-
-The graph state is intentionally composed of JSON-compatible primitives so
-LangGraph can persist it through SQLite checkpointing and resume a case after
-an inbound message or a promised-date event. Nodes should return partial
-updates to this TypedDict rather than mutating state in place.
-"""
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
