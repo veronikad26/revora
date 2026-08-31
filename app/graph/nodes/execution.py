@@ -68,6 +68,7 @@ def execution_node(
             "already_attempted_flag": True,
             "retry_count": state.get("retry_count", 0) + (0 if skipped else 1),
             "execution_result": _result_text(result),
+            "outcome": "pending" if not skipped else "do_nothing",
             "updated_at": now,
         }
 
