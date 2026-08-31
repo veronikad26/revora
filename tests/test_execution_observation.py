@@ -4,7 +4,7 @@ from app.graph.nodes.closed_loop_update import closed_loop_update_node
 from app.graph.state import new_case_state
 
 def test_execution_is_dry_run_and_increments_retry():
-    state=new_case_state(case_id="c1",entry_point="failure",customer_id="u1")
+    state=new_case_state(case_id="c1",entry_point="failure",customer_id="u1",payment_id="pay-1")
     state.update({"authorized_action":"retry"})
     result=execution_node(state)
     assert result["already_attempted_flag"] is True

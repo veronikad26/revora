@@ -1,13 +1,3 @@
-"""
-Tests for the Policy Engine node (app/graph/nodes/policy_engine.py).
-
-To cover: every guardrail (retry limit, contact limit, contact hours,
-consent, PTP limits, dispute/confidence status) is independently
-re-checked and can reject an action regardless of what upstream nodes
-proposed.
-
-No implementation yet — skeleton only.
-"""
 from datetime import datetime, timezone
 from app.graph.nodes.policy_engine import policy_engine_node
 from app.graph.state import new_case_state
