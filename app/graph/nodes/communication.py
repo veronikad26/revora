@@ -8,7 +8,7 @@ from app.config import MAX_CUSTOMER_CONTACTS, OPT_OUT_KEYWORDS, TRUST_FIREWALL_M
 from app.graph.state import RecoveryState
 from app.integrations.gemini_client import CustomerIntent, GeminiClient
 from app.graph.nodes.trust_firewall import trust_firewall_node
-from app.rules.ptp_state_machine import on_inbound_reply, on_outbound_sent
+from app.rules.ptp_state_machine import mark_kept, on_inbound_reply, on_outbound_sent
 
 
 OUTBOUND_ACTIONS = {"notify", "nudge", "negotiate"}
@@ -49,6 +49,7 @@ def _intent_dict(intent: CustomerIntent) -> dict[str, Any]:
         "refusal": intent.refusal,
         "opt_out": intent.opt_out,
         "raw_text": intent.raw_text,
+        "payment_confirmed": intent.payment_confirmed,
     }
 
 
@@ -75,11 +76,12 @@ def _inbound_update(state: RecoveryState, client: GeminiClient) -> dict[str, Any
         "consent_flag": False if intent.opt_out else state.get("consent_flag", False),
         "contact_allowed": False if intent.opt_out else state.get("contact_allowed", False),
         "dispute_flag": bool(intent.dispute_flag),
+        "payment_confirmed": bool(intent.payment_confirmed),
         "promised_date": intent.promise_date,
         "last_customer_reply": reply,
         "conversation_history": [{"direction": "in", "channel": state.get("channel", "whatsapp"), "content": reply, "timestamp": timestamp}],
     }
-    update.update(on_inbound_reply(state, intent_dict))
+    update.update(mark_kept(state) if intent.payment_confirmed else on_inbound_reply(state, intent_dict))
     return update
 
 
@@ -124,6 +126,5 @@ def communication_node(
         **on_outbound_sent(state),
         "conversation_history": [{"direction": "out", "channel": state.get("channel", "whatsapp"), "content": draft, "timestamp": datetime.now(timezone.utc).isoformat()}],
     }
-
 
 communicate = communication_node

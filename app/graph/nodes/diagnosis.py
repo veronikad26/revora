@@ -95,9 +95,13 @@ def diagnosis_node(state: RecoveryState, session: Any | None = None) -> dict[str
 
     category, confidence, reason = _classify(state)
     event_id = state.get("event_id") or state["case_id"]
+    learned = dict(state.get("learning_updates") or {}).get("confidence_adjustments", {})
+    adjusted_score = max(0.0, min(1.0, confidence.score + float(learned.get(category, 0.0))))
+    if learned.get(category):
+        reason += f"; learned confidence adjustment={float(learned[category]):+.4f}"
     update: dict[str, Any] = {
         "root_cause_category": category,
-        "confidence": confidence.score,
+        "confidence": round(adjusted_score, 4),
         "diagnosis_reason": reason,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -108,7 +112,7 @@ def diagnosis_node(state: RecoveryState, session: Any | None = None) -> dict[str
                 event_id=event_id,
                 event_type=state.get("event_type") or state.get("entry_point", "unknown"),
                 category=category,
-                confidence=confidence.score,
+                confidence=adjusted_score,
                 reason=reason,
             )
         )

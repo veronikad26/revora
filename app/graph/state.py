@@ -79,6 +79,7 @@ class ParsedIntent(TypedDict, total=False):
     refusal: bool
     opt_out: bool
     raw_text: str
+    payment_confirmed: bool
 
 
 class AuditEvent(TypedDict, total=False):
@@ -153,6 +154,9 @@ class RecoveryState(TypedDict, total=False):
     last_customer_reply: str | None
     parsed_intent: ParsedIntent | None
     draft_message: str | None
+    pending_event: Literal["inbound_reply", "consent_granted"] | None
+    payment_confirmed: bool
+    retry_delay_multiplier: float
     audit_trail: Annotated[list[AuditEvent], add]
     outcome: CaseOutcome | None
     outcome_reason: str | None
@@ -252,6 +256,9 @@ def new_case_state(
         last_customer_reply=None,
         parsed_intent=None,
         draft_message=None,
+        pending_event=None,
+        payment_confirmed=False,
+        retry_delay_multiplier=1.0,
         audit_trail=[],
         outcome=None,
         outcome_reason=None,

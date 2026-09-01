@@ -19,6 +19,7 @@ class CustomerIntent:
     refusal: bool = False
     opt_out: bool = False
     raw_text: str = ""
+    payment_confirmed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -28,6 +29,7 @@ class CustomerIntent:
             "refusal": self.refusal,
             "opt_out": self.opt_out,
             "raw_text": self.raw_text,
+            "payment_confirmed": self.payment_confirmed,
         }
 
 
@@ -90,10 +92,18 @@ class GeminiClient:
             dispute = any(term in lowered for term in ("dispute", "wrong amount", "गलत रकम", "not my invoice"))
             refusal = any(term in lowered for term in ("cannot pay", "can't pay", "refuse", "नहीं दे सकता"))
             acknowledged = any(term in lowered for term in ("pay", "payment", "invoice", "कर दूंगा", "कर दूँगा"))
-            return CustomerIntent(amount_acknowledged=acknowledged, dispute_flag=dispute, refusal=refusal, opt_out=opt_out, raw_text=reply)
-        schema = {"type": "OBJECT", "properties": {"promise_date": {"type": "STRING", "nullable": True}, "amount_acknowledged": {"type": "BOOLEAN"}, "dispute_flag": {"type": "BOOLEAN"}, "refusal": {"type": "BOOLEAN"}, "opt_out": {"type": "BOOLEAN"}}, "required": ["amount_acknowledged", "dispute_flag", "refusal", "opt_out"]}
+            payment_confirmed = any(term in lowered for term in ("paid", "payment done", "payment successful", "भुगतान कर दिया"))
+            promise_date = None
+            date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", reply)
+            if date_match:
+                promise_date = date_match.group(1)
+            elif any(term in lowered for term in ("today", "aaj", "आज")) and not payment_confirmed:
+                from datetime import date
+                promise_date = date.today().isoformat()
+            return CustomerIntent(promise_date=promise_date, amount_acknowledged=acknowledged, dispute_flag=dispute, refusal=refusal, opt_out=opt_out, raw_text=reply, payment_confirmed=payment_confirmed)
+        schema = {"type": "OBJECT", "properties": {"promise_date": {"type": "STRING", "nullable": True}, "amount_acknowledged": {"type": "BOOLEAN"}, "dispute_flag": {"type": "BOOLEAN"}, "refusal": {"type": "BOOLEAN"}, "opt_out": {"type": "BOOLEAN"}, "payment_confirmed": {"type": "BOOLEAN"}}, "required": ["amount_acknowledged", "dispute_flag", "refusal", "opt_out", "payment_confirmed"]}
         prompt = ("Parse this customer reply into JSON only. Do not invent a date. "
-                  "Fields: promise_date (ISO date or null), amount_acknowledged, dispute_flag, refusal, opt_out.\nReply: " + reply)
+                  "Fields: promise_date (ISO date or null), amount_acknowledged, dispute_flag, refusal, opt_out, payment_confirmed.\nReply: " + reply)
         raw = self._generate(prompt, response_mime_type="application/json")
         data = self._extract_json(raw)
         return CustomerIntent(
@@ -103,6 +113,7 @@ class GeminiClient:
             refusal=bool(data.get("refusal", False)),
             opt_out=bool(data.get("opt_out", False)),
             raw_text=reply,
+            payment_confirmed=bool(data.get("payment_confirmed", False)),
         )
 
 

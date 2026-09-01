@@ -150,3 +150,13 @@ OPT_OUT_KEYWORDS: tuple[str, ...] = (
 # needs "all risk-ops-flagged cases" filters AuditLogEntry on this
 # action value.
 RISK_OPS_AUDIT_ACTION: str = "risk_ops_flag"
+
+
+def integration_status() -> dict[str, object]:
+    """Expose whether provider calls are live or intentionally simulated."""
+    return {
+        "mode": "dry_run" if DRY_RUN else "live",
+        "gemini": "dry_run" if DRY_RUN else ("configured" if GEMINI_API_KEY else "missing_credentials"),
+        "razorpay": "dry_run" if DRY_RUN else ("configured" if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET else "missing_credentials"),
+        "twilio": "dry_run" if DRY_RUN else ("configured" if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM else "missing_credentials"),
+    }

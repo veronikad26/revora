@@ -123,7 +123,6 @@ async def twilio_whatsapp_webhook(request: Request, x_twilio_signature: str | No
     snapshot = graph.get_state(config)
     if not snapshot.values:
         raise HTTPException(status_code=404, detail="case checkpoint not found")
-    state = dict(snapshot.values)
-    state["last_customer_reply"] = values["body"]
-    result = graph.invoke(state, config=config)
+    graph.update_state(config, {"last_customer_reply": values["body"], "pending_event": "inbound_reply", "event_id": values["message_sid"]})
+    result = graph.invoke({}, config=config)
     return {"status": "processed", "case_id": case_id, "message_sid": values["message_sid"], "state": result}
