@@ -119,6 +119,47 @@ def get_case(case_id: str, request: Request) -> dict[str, Any]:
     return {"case_id": case_id, "state": snapshot.values}
 
 
+@router.post("/cases/{case_id}/confirm-payment")
+def confirm_payment(case_id: str, request: Request) -> dict[str, Any]:
+    """Record an external payment confirmation and close the case as recovered.
+
+    This endpoint represents the provider/webhook confirmation step; it does
+    not charge the customer. It is also useful for demonstrating the recovered
+    path from the dashboard without requiring a live payment provider.
+    """
+    config = {"configurable": {"thread_id": case_id}}
+    graph = _graph(request)
+    snapshot = graph.get_state(config)
+    if not snapshot.values:
+        raise HTTPException(status_code=404, detail="case not found")
+
+    state = snapshot.values
+    now = datetime.now(timezone.utc).isoformat()
+    audit_event = {
+        "action": "payment_confirmed",
+        "actor": "payment_provider",
+        "entity_type": "case",
+        "entity_id": case_id,
+        "reason": "external payment confirmation received",
+        "customer_visible_reason": None,
+        "timestamp": now,
+    }
+    graph.update_state(
+        config,
+        {
+            "payment_confirmed": True,
+            "ptp_state": "KEPT",
+            "outcome": "recovered",
+            "outcome_reason": "payment confirmed by provider",
+            "recovered_amount": state.get("amount"),
+            "execution_result": "payment_confirmed",
+            "audit_trail": [audit_event],
+            "updated_at": now,
+        },
+    )
+    return {"case_id": case_id, "state": graph.get_state(config).values}
+
+
 @router.post("/cases/{case_id}/consent")
 def update_consent(case_id: str, payload: ConsentRequest, request: Request) -> dict[str, Any]:
     config = {"configurable": {"thread_id": case_id}}
