@@ -204,8 +204,10 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
 def render_live_case_viewer(*, st: Any, client: RevoraAPIClient, default_case_ids: list[str]) -> None:
     st.subheader("Fully traced case")
     st.caption("Case state is fetched live from the persisted graph checkpoint.")
-    default_case_id = st.session_state.get("last_case_id", default_case_ids[0] if default_case_ids else "")
-    case_id = st.text_input("Case ID", value=default_case_id, key="live_case_id")
+    default_case_id = st.session_state.get("last_case_id", "")
+    if not default_case_id and default_case_ids:
+        st.info("Evaluation report IDs are historical only. Submit a new case above to create a live case that can be refreshed or marked recovered.")
+    case_id = st.text_input("Live API case ID", value=default_case_id, key="live_case_id")
     if st.button("Refresh case", type="secondary"):
         if not case_id.strip():
             st.warning("Enter a case ID first.")
