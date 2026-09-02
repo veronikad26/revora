@@ -4,6 +4,7 @@ from typing import Any
 from app.config import OPT_OUT_KEYWORDS
 from app.graph.state import RecoveryState
 from app.models.consent_flag import ConsentFlag
+from app.rules.consent_store import record_opt_out
 
 def _opted_out(text: str | None) -> bool:
     raw=(text or "").casefold()
@@ -23,6 +24,7 @@ def consent_gate_node(state: RecoveryState, session: Any | None = None) -> dict[
     if opted_out:
         consent=False
         reason="customer opt-out received; future automated contact disabled"
+        record_opt_out(session, customer_id=customer_id, channel=channel, case_id=state.get("case_id", ""), reason=reason)
     elif consent:
         reason="consent on file"
     else:

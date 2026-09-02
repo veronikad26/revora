@@ -8,6 +8,7 @@ from app.config import MAX_CUSTOMER_CONTACTS, OPT_OUT_KEYWORDS, TRUST_FIREWALL_M
 from app.graph.state import RecoveryState
 from app.integrations.gemini_client import CustomerIntent, GeminiClient
 from app.graph.nodes.trust_firewall import trust_firewall_node
+from app.rules.consent_store import record_opt_out
 from app.rules.ptp_state_machine import mark_kept, on_inbound_reply, on_outbound_sent
 
 
@@ -53,11 +54,18 @@ def _intent_dict(intent: CustomerIntent) -> dict[str, Any]:
     }
 
 
-def _inbound_update(state: RecoveryState, client: GeminiClient) -> dict[str, Any]:
+def _inbound_update(state: RecoveryState, client: GeminiClient, session: Any | None = None) -> dict[str, Any]:
     reply = state.get("last_customer_reply") or ""
     timestamp = datetime.now(timezone.utc).isoformat()
     if _has_opted_out(reply):
         intent = CustomerIntent(opt_out=True, raw_text=reply)
+        record_opt_out(
+            session,
+            customer_id=state.get("customer_id", ""),
+            channel=state.get("channel", "whatsapp"),
+            case_id=state.get("case_id", ""),
+            reason="customer opt-out received before intent parsing",
+        )
         return {
             "parsed_intent": _intent_dict(intent),
             "opt_out": True,
@@ -91,12 +99,13 @@ def communication_node(
     mode: str = "outbound",
     gemini_client: GeminiClient | None = None,
     firewall: Callable[..., dict[str, Any]] = trust_firewall_node,
+    session: Any | None = None,
 ) -> dict[str, Any]:
     """Generate or parse communication without granting execution authority."""
 
     client = gemini_client or GeminiClient()
     if mode == "inbound":
-        return _inbound_update(state, client)
+        return _inbound_update(state, client, session)
     if mode != "outbound":
         raise ValueError("mode must be 'inbound' or 'outbound'")
     if state.get("contact_count", 0) >= MAX_CUSTOMER_CONTACTS:

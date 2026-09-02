@@ -1,7 +1,8 @@
 """Assembly of the guarded RecoverAI LangGraph StateGraph."""
 from __future__ import annotations
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from langgraph.graph import END, START, StateGraph
 from app.db.checkpointer import create_checkpointer
 from app.graph.edges.routing import after_communication, after_consent, after_firewall, after_router, entry_route
@@ -17,24 +18,84 @@ from app.graph.nodes.trust_firewall import trust_firewall_node
 from app.graph.state import RecoveryState
 
 
-def inbound_communication_node(state: RecoveryState) -> dict[str, Any]:
+def inbound_communication_node(state: RecoveryState, session: Any | None = None) -> dict[str, Any]:
     """Parse a queued customer reply, then clear the one-shot event marker."""
-    update = communication_node(state, mode="inbound")
+    update = communication_node(state, mode="inbound", session=session)
     return {**update, "pending_event": None, "draft_message": None, "authorized_action": None}
 
 
-def build_graph(*, checkpointer: Any | None = None, checkpoint_path: str | Path | None = None):
+def _with_session(node_fn: Callable[..., dict[str, Any]], session_factory: Callable[[], Any]) -> Callable[[RecoveryState], dict[str, Any]]:
+    """Wrap a node so this call gets its own short-lived, committed DB session.
+
+    This is what actually makes a real ``build_graph()`` run (API routes,
+    webhooks) persist the Phase 0 guardrail decisions -- ``ConsentFlag``
+    flipped to ``False`` on opt-out, and the ``AuditLogEntry`` trail
+    (including ``risk_ops_flag`` routing and Policy Engine decisions) --
+    instead of only holding those decisions in in-memory graph state for
+    the single invocation. Node functions already accept ``session=None``
+    and silently skip persistence when it's absent, so this wrapper is
+    purely additive: any ``build_graph()`` call that omits
+    ``session_factory`` (unit tests, the synthetic evaluation harness)
+    behaves exactly as before, with zero persistence side effects.
+
+    Each node opens and closes its own session rather than sharing one
+    across the whole graph run, so a DB error in one node can't roll back
+    another node's already-committed audit trail.
+    """
+
+    @wraps(node_fn)
+    def wrapped(state: RecoveryState) -> dict[str, Any]:
+        session = session_factory()
+        try:
+            result = node_fn(state, session=session)
+            session.commit()
+            return result
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    return wrapped
+
+
+def build_graph(
+    *,
+    checkpointer: Any | None = None,
+    checkpoint_path: str | Path | None = None,
+    session_factory: Callable[[], Any] | None = None,
+):
     graph = StateGraph(RecoveryState)
-    graph.add_node("diagnosis", diagnosis_node)
+
+    if session_factory is not None:
+        diagnosis = _with_session(diagnosis_node, session_factory)
+        consent_gate = _with_session(consent_gate_node, session_factory)
+        communication = _with_session(communication_node, session_factory)
+        communication_inbound = _with_session(inbound_communication_node, session_factory)
+        trust_firewall = _with_session(trust_firewall_node, session_factory)
+        policy_engine = _with_session(policy_engine_node, session_factory)
+        observation = _with_session(observation_node, session_factory)
+        closed_loop_update = _with_session(closed_loop_update_node, session_factory)
+    else:
+        diagnosis = diagnosis_node
+        consent_gate = consent_gate_node
+        communication = communication_node
+        communication_inbound = inbound_communication_node
+        trust_firewall = trust_firewall_node
+        policy_engine = policy_engine_node
+        observation = observation_node
+        closed_loop_update = closed_loop_update_node
+
+    graph.add_node("diagnosis", diagnosis)
     graph.add_node("recovery_router", recovery_router_node)
-    graph.add_node("consent_gate", consent_gate_node)
-    graph.add_node("communication", communication_node)
-    graph.add_node("communication_inbound", inbound_communication_node)
-    graph.add_node("trust_firewall", trust_firewall_node)
-    graph.add_node("policy_engine", policy_engine_node)
+    graph.add_node("consent_gate", consent_gate)
+    graph.add_node("communication", communication)
+    graph.add_node("communication_inbound", communication_inbound)
+    graph.add_node("trust_firewall", trust_firewall)
+    graph.add_node("policy_engine", policy_engine)
     graph.add_node("execution", execution_node)
-    graph.add_node("observation", observation_node)
-    graph.add_node("closed_loop_update", closed_loop_update_node)
+    graph.add_node("observation", observation)
+    graph.add_node("closed_loop_update", closed_loop_update)
     graph.add_conditional_edges(START, entry_route, {"diagnosis": "diagnosis", "communication_inbound": "communication_inbound", "recovery_router": "recovery_router"})
     graph.add_edge("communication_inbound", "recovery_router")
     graph.add_edge("diagnosis", "recovery_router")
