@@ -10,6 +10,7 @@ services:
       - revora_data:/app/data
     environment:
       DATABASE_URL: sqlite:////app/data/revora.db
+      LANGGRAPH_CHECKPOINT_PATH: /app/data/revora_checkpoints.db
       DRY_RUN: "${DRY_RUN:-true}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

@@ -66,6 +66,34 @@ for _var_name, _var_value in (
 
 
 # --------------------------------------------------------------------------
+# LangGraph checkpoint persistence
+# --------------------------------------------------------------------------
+#
+# Case state (root-cause diagnosis, PTP lifecycle, retry/contact counters,
+# audit trail, authorized_action, execution_result -- everything
+# GET /cases/{case_id} returns) is held by LangGraph's checkpointer,
+# addressed by thread_id == case_id. This is a SEPARATE persistence layer
+# from the SQL rows written via session_factory (FailureEvent,
+# CheckoutEvent, AuditLogEntry, etc.) -- the two don't know about each
+# other.
+#
+# Leaving this path unset makes app/db/checkpointer.py::create_checkpointer
+# fall back to LangGraph's MemorySaver, which is in-memory only and scoped
+# to a single running process. Any server restart, --reload autoreload
+# cycle, or additional worker process then makes previously created cases
+# permanently invisible to GET /cases/{case_id} / confirm-payment --
+# "case not found" -- even though their underlying FailureEvent /
+# CheckoutEvent rows are still sitting safely in the SQL database, because
+# that write succeeded independently of the checkpoint.
+#
+# Setting this to a real file path switches app/main.py's build_graph()
+# call to LangGraph's SqliteSaver (already available via the
+# langgraph-checkpoint-sqlite dependency), so case checkpoints survive
+# restarts the same way the rest of the data model already does.
+LANGGRAPH_CHECKPOINT_PATH: str = os.getenv("LANGGRAPH_CHECKPOINT_PATH", "./revora_checkpoints.db")
+
+
+# --------------------------------------------------------------------------
 # Hard, non-negotiable guardrail constants (PRD Section 6.4)
 # --------------------------------------------------------------------------
 

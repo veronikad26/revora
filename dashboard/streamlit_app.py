@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -120,7 +121,34 @@ def _render_case_state(state: dict[str, Any], *, st: Any) -> None:
         st.json(state)
 
 
-def _submit_form(entry_point: str, label: str, fields: list[tuple[str, str, Any]], *, st: Any, client: RevoraAPIClient) -> None:
+def _checkout_payload_transform(values: dict[str, Any]) -> dict[str, Any]:
+    """Convert the dashboard's 'hours since last activity' input into the
+    ISO timestamp the API expects.
+
+    Without this, the checkout form silently omitted ``last_activity_at``
+    entirely, so ``CheckoutRequest`` fell back to ``now`` for every
+    submitted case (see ``app/api/routes.py::create_checkout``). That made
+    the abandonment-scorer's largest single signal -- "inactive for at
+    least 24 hours" (+0.30 of the 1.0 max score, see
+    ``app/rules/abandonment_scorer.py``) -- impossible to trigger from the
+    dashboard, so every demo checkout case scored below
+    ``CONFIDENCE_THRESHOLD`` and was auto-escalated instead of exercising
+    the actual abandoned-checkout playbook.
+    """
+    hours_ago = values.pop("hours_since_last_activity", 0)
+    values["last_activity_at"] = (datetime.now(timezone.utc) - timedelta(hours=float(hours_ago))).isoformat()
+    return values
+
+
+def _submit_form(
+    entry_point: str,
+    label: str,
+    fields: list[tuple[str, str, Any]],
+    *,
+    st: Any,
+    client: RevoraAPIClient,
+    transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> None:
     with st.form(f"submit_{entry_point}_form", clear_on_submit=False):
         values: dict[str, Any] = {}
         for name, field_label, default in fields:
@@ -134,10 +162,16 @@ def _submit_form(entry_point: str, label: str, fields: list[tuple[str, str, Any]
 
     if submitted:
         try:
-            response = client.submit_case(entry_point, values)
+            payload = transform(dict(values)) if transform else values
+            response = client.submit_case(entry_point, payload)
             case_id = _case_id_from_response(response)
             if case_id:
                 st.session_state["last_case_id"] = case_id
+                # Force the live-case-id widget to pick up the new id on
+                # next render instead of keeping whatever the user last
+                # typed (Streamlit widget state otherwise "owns" the value
+                # once the widget has rendered once with a `key`).
+                st.session_state["live_case_id"] = case_id
             st.success(f"{entry_point.title()} case processed: {case_id or 'response received'}")
             state = response.get("state")
             if isinstance(state, dict):
@@ -171,6 +205,11 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
         )
 
     with checkout:
+        st.caption(
+            "\"Hours since last activity\" drives the abandonment score's biggest "
+            "signal (24h+ inactivity = +0.30) — set it to 24 or more to see the "
+            "case actually clear the confidence threshold instead of auto-escalating."
+        )
         _submit_form(
             "checkout",
             "Process checkout case",
@@ -181,9 +220,11 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
                 ("currency", "Currency", "INR"),
                 ("funnel_stage_reached", "Funnel stage reached", "payment"),
                 ("prior_abandonment_count", "Prior abandonment count", 0),
+                ("hours_since_last_activity", "Hours since last activity", 26),
             ],
             st=st,
             client=client,
+            transform=_checkout_payload_transform,
         )
 
     with receivable:
