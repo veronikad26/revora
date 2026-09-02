@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from app.config import RISK_OPS_AUDIT_ACTION
 from app.graph.build_graph import build_graph
 from app.graph.state import new_case_state
-from app.models import AuditLogEntry, Base, ConsentFlag
+from app.models import AuditLogEntry, Base, ConsentFlag, RetryAttempt
 
 
 def _isolated_session_factory():
@@ -64,3 +64,19 @@ def test_build_graph_without_session_factory_has_no_persistence_side_effects():
     state = new_case_state(case_id="no-persist-1", entry_point="failure", customer_id="cust-1", payment_id="pay-1", gateway_reason="insufficient_funds", method="card")
     result = graph.invoke(state, config={"configurable": {"thread_id": "no-persist-1"}})
     assert result["authorized_action"] == "retry"
+
+
+def test_authorized_retry_persists_retry_attempt():
+    session_factory, engine = _isolated_session_factory()
+    graph = build_graph(session_factory=session_factory)
+
+    state = new_case_state(case_id="persist-3", entry_point="failure", customer_id="cust-retry", payment_id="pay-3", gateway_reason="insufficient_funds", method="card", amount=500)
+    result = graph.invoke(state, config={"configurable": {"thread_id": "persist-3"}})
+    assert result["authorized_action"] == "retry"
+
+    with session_factory() as check:
+        attempt = check.query(RetryAttempt).filter_by(failure_event_id="persist-3", attempt_number=1).one()
+        assert attempt.already_attempted is True
+        assert attempt.result is not None
+
+    engine.dispose()

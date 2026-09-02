@@ -74,6 +74,7 @@ def build_graph(
         communication_inbound = _with_session(inbound_communication_node, session_factory)
         trust_firewall = _with_session(trust_firewall_node, session_factory)
         policy_engine = _with_session(policy_engine_node, session_factory)
+        execution = _with_session(execution_node, session_factory)
         observation = _with_session(observation_node, session_factory)
         closed_loop_update = _with_session(closed_loop_update_node, session_factory)
     else:
@@ -83,6 +84,7 @@ def build_graph(
         communication_inbound = inbound_communication_node
         trust_firewall = trust_firewall_node
         policy_engine = policy_engine_node
+        execution = execution_node
         observation = observation_node
         closed_loop_update = closed_loop_update_node
 
@@ -93,7 +95,7 @@ def build_graph(
     graph.add_node("communication_inbound", communication_inbound)
     graph.add_node("trust_firewall", trust_firewall)
     graph.add_node("policy_engine", policy_engine)
-    graph.add_node("execution", execution_node)
+    graph.add_node("execution", execution)
     graph.add_node("observation", observation)
     graph.add_node("closed_loop_update", closed_loop_update)
     graph.add_conditional_edges(START, entry_route, {"diagnosis": "diagnosis", "communication_inbound": "communication_inbound", "recovery_router": "recovery_router"})
