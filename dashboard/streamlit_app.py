@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import uuid
@@ -287,7 +288,7 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
             "(you'll see a yellow notice instead of green). Click below for "
             "a fresh one before your next submission if needed."
         )
-        st.caption("📵 Failures go through **retry**, not messaging — there's no WhatsApp contact for this entry point.")
+        st.caption("Failure cases do not require messaging; Revora handles them through **retry**.")
         st.button(
             "🔁 New demo Payment ID",
             key="regen_failure_payment_id",
@@ -387,7 +388,7 @@ def _render_ptp_chat(case_id: str, *, st: Any, client: RevoraAPIClient) -> None:
     entry_point = state.get("entry_point")
 
     if entry_point == "failure":
-        st.info("📵 Failure cases are resolved through retry, not messaging — there's no negotiation chat for this case.")
+        st.info("Failure cases do not require messaging; Revora handles them through **retry**. There is no negotiation chat for this case.")
         return
 
     if st.button("▶️ Start / refresh negotiation", key=f"start_negotiation_{case_id}"):
@@ -413,12 +414,31 @@ def _render_ptp_chat(case_id: str, *, st: Any, client: RevoraAPIClient) -> None:
             st.write(message.get("content", ""))
 
     reply = st.chat_input("Type the customer's reply…", key=f"chat_input_{case_id}")
+    consumed_reply_key = f"chat_reply_consumed_{case_id.strip()}"
     if reply:
+        # Streamlit reruns the script after widget interaction. Depending on
+        # the Streamlit/browser version, chat_input can still expose the same
+        # submitted value during the rerun. Without a one-shot guard, the
+        # code below repeatedly calls simulate_reply() and reruns forever.
+        fingerprint = hashlib.sha256(
+            f"{case_id.strip()}\\0{reply}".encode("utf-8")
+        ).hexdigest()
+        if st.session_state.get(consumed_reply_key) == fingerprint:
+            # The previous run already submitted this exact reply. Keep the
+            # marker while the widget still exposes the same value, so any
+            # additional rerun (including a scroll-triggered rerun) remains a
+            # no-op. The marker is cleared below once the widget is empty.
+            return
+        st.session_state[consumed_reply_key] = fingerprint
         try:
             client.simulate_reply(case_id.strip(), reply)
             st.rerun()
         except RevoraAPIError as exc:
+            st.session_state.pop(consumed_reply_key, None)
             st.error(str(exc))
+    else:
+        # Do not keep a stale marker if the widget cleared normally.
+        st.session_state.pop(consumed_reply_key, None)
 
 
 def render_live_case_viewer(*, st: Any, client: RevoraAPIClient, default_case_ids: list[str]) -> None:

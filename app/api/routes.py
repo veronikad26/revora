@@ -220,7 +220,16 @@ def update_consent(case_id: str, payload: ConsentRequest, request: Request) -> d
         session.close()
     graph = _graph(request)
     graph.update_state(config, {"consent_flag": payload.consent, "consent_checked": True, "contact_allowed": payload.consent, "consent_reason": "consent updated through API", "pending_event": "consent_granted" if payload.consent else None, "outcome": None if payload.consent else "do_nothing", "outcome_reason": None if payload.consent else "consent revoked through API"})
-    result = graph.invoke({}, config=config) if payload.consent else graph.get_state(config).values
+    if payload.consent:
+        # ``consent_granted`` is a one-shot graph entry event. Clear it after
+        # the single consent-triggered outbound run; otherwise any later
+        # invocation of this checkpoint re-enters recovery_router -> consent
+        # gate -> communication and can generate/send the same message again.
+        graph.invoke({}, config=config)
+        graph.update_state(config, {"pending_event": None})
+        result = graph.get_state(config).values
+    else:
+        result = graph.get_state(config).values
     return {"case_id": case_id, "consent": payload.consent, "channel": payload.channel, "state": result}
 
 
