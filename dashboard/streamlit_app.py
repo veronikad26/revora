@@ -101,6 +101,20 @@ def _new_demo_payment_id() -> str:
     return f"payment-demo-{uuid.uuid4().hex[:8]}"
 
 
+def _reset_failure_payment_id(*, st: Any) -> None:
+    """Callback for the 'New demo Payment ID' button (see render_case_submission_forms).
+
+    Must run as a widget on_click callback, NOT after the payment_id
+    text_input has already rendered in the current script run --
+    Streamlit raises StreamlitAPIException if you assign to
+    st.session_state["failure_payment_id"] once that run's text_input
+    with the same key has already been instantiated. Callbacks execute
+    before the *next* rerun begins, so the text_input for that upcoming
+    run hasn't been created yet and the assignment is safe there.
+    """
+    st.session_state["failure_payment_id"] = _new_demo_payment_id()
+
+
 def _render_case_state(state: dict[str, Any], *, st: Any) -> None:
     """Render the operational fields returned by either POST or GET /cases/{id}."""
     st.subheader(f"Case {state.get('case_id', 'unknown')}")
@@ -165,7 +179,6 @@ def _submit_form(
     st: Any,
     client: RevoraAPIClient,
     transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    on_response: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     with st.form(f"submit_{entry_point}_form", clear_on_submit=False):
         values: dict[str, Any] = {}
@@ -206,9 +219,6 @@ def _submit_form(
                 _render_case_state({"case_id": case_id, **state}, st=st)
             else:
                 st.json(response)
-
-            if on_response:
-                on_response(response)
         except RevoraAPIError as exc:
             st.error(str(exc))
 
@@ -221,13 +231,22 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
     with failure:
         # Seed a unique default once per session so the very first
         # submission doesn't collide with anyone else's earlier testing.
+        # This assignment happens BEFORE the payment_id text_input renders
+        # below, which is the one safe time to set a widget-linked
+        # session_state key directly.
         if "failure_payment_id" not in st.session_state:
             st.session_state["failure_payment_id"] = _new_demo_payment_id()
         st.caption(
             "Payment ID is deduplicated server-side — resubmitting the same "
-            "value returns the original case instead of creating a new one. "
-            "The default below is regenerated after every submission so "
-            "repeat testing doesn't accidentally collide."
+            "value returns the original case instead of creating a new one "
+            "(you'll see a yellow notice instead of green). Click below for "
+            "a fresh one before your next submission if needed."
+        )
+        st.button(
+            "🔁 New demo Payment ID",
+            key="regen_failure_payment_id",
+            on_click=_reset_failure_payment_id,
+            kwargs={"st": st},
         )
         _submit_form(
             "failure",
@@ -243,9 +262,6 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
             ],
             st=st,
             client=client,
-            on_response=lambda _response: st.session_state.update(
-                {"failure_payment_id": _new_demo_payment_id()}
-            ),
         )
 
     with checkout:
