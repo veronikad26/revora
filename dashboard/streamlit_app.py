@@ -67,49 +67,20 @@ class RevoraAPIClient:
         For entry points whose playbook proposes notify/nudge/negotiate
         (overdue_invoice, abandoned_checkout), granting consent here is what
         re-invokes the graph server-side and drives it through Communication
-        -> Trust Firewall -> Policy Engine -> Execution, i.e. what actually
-        triggers the PTP/nudge message to be drafted and (in live mode) sent
-        over WhatsApp via Twilio.
+        -> Trust Firewall -> Policy Engine -> Execution -- i.e. what actually
+        drafts and "sends" (dry-run, no real provider) the first PTP/nudge
+        message shown in the negotiation chat.
         """
         return self._request("POST", f"/cases/{case_id}/consent", json={"consent": consent, "channel": channel})
 
-    def simulate_inbound_whatsapp(self, case_id: str, body_text: str, *, from_number: str = "whatsapp:+910000000000") -> dict[str, Any]:
-        """Post a Twilio-shaped inbound reply straight to the webhook route.
+    def simulate_reply(self, case_id: str, reply_text: str) -> dict[str, Any]:
+        """Feed a typed customer reply into the graph's inbound path.
 
-        Mirrors exactly what a real Twilio sandbox webhook delivers (form-
-        encoded, not JSON), so this exercises the same
-        parse_inbound_webhook -> communication_node(mode="inbound") ->
-        PTP state machine path a live customer reply would, without needing
-        an active Twilio sandbox connection. Useful for demoing
-        PROMISED/KEPT/DISPUTED/ESCALATED transitions on demand.
+        No messaging provider involved — this hits our own FastAPI route,
+        which runs the exact same communication_node(mode="inbound") ->
+        PTP state machine path a real inbound message would.
         """
-        try:
-            response = requests.post(
-                f"{self.base_url}/webhooks/twilio/whatsapp",
-                data={
-                    "CaseId": case_id,
-                    "MessageSid": f"SIM-{uuid.uuid4().hex[:8]}",
-                    "From": from_number,
-                    "Body": body_text,
-                },
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            detail = ""
-            resp = getattr(exc, "response", None)
-            if resp is not None:
-                try:
-                    detail = resp.json().get("detail", "")
-                except (ValueError, AttributeError):
-                    detail = resp.text
-            suffix = f": {detail}" if detail else ""
-            raise RevoraAPIError(f"POST /webhooks/twilio/whatsapp failed{suffix}") from exc
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise RevoraAPIError("POST /webhooks/twilio/whatsapp returned invalid JSON") from exc
-        return payload
+        return self._request("POST", f"/cases/{case_id}/simulate-reply", json={"reply": reply_text})
 
 
 def load_report(path: str | Path = "evaluation/results.json") -> dict[str, Any]:
@@ -247,7 +218,7 @@ def _submit_form(
         grant_consent = False
         if show_consent_toggle:
             grant_consent = st.checkbox(
-                "Customer has given WhatsApp consent (send PTP/nudge message immediately)",
+                "Customer has given WhatsApp consent (draft & simulate-send the first message immediately)",
                 value=True,
                 key=f"{entry_point}_grant_consent",
             )
@@ -285,7 +256,7 @@ def _submit_form(
                     consent_state = consent_response.get("state")
                     if isinstance(consent_state, dict):
                         state = consent_state
-                        st.success("Consent granted — PTP/nudge message drafted, firewall-checked, and sent (dry-run or live depending on DRY_RUN).")
+                        st.success("Consent granted — first PTP/nudge message drafted and (dry-run) sent. Open the negotiation chat below to continue.")
                 except RevoraAPIError as exc:
                     st.error(f"Consent grant failed: {exc}")
 
@@ -316,6 +287,7 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
             "(you'll see a yellow notice instead of green). Click below for "
             "a fresh one before your next submission if needed."
         )
+        st.caption("📵 Failures go through **retry**, not messaging — there's no WhatsApp contact for this entry point.")
         st.button(
             "🔁 New demo Payment ID",
             key="regen_failure_payment_id",
@@ -327,7 +299,6 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
             "Process failure case",
             [
                 ("customer_id", "Customer ID", "customer-demo"),
-                ("customer_phone", "Customer WhatsApp number (e.g. +91XXXXXXXXXX)", ""),
                 ("payment_id", "Payment ID", st.session_state["failure_payment_id"]),
                 ("amount", "Amount", 1000.0),
                 ("currency", "Currency", "INR"),
@@ -350,7 +321,7 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
             "Process checkout case",
             [
                 ("customer_id", "Customer ID", "customer-demo"),
-                ("customer_phone", "Customer WhatsApp number (e.g. +91XXXXXXXXXX)", ""),
+                ("customer_phone", "Customer phone (used only for the simulated chat below — no real message is sent)", "+919999999999"),
                 ("cart_id", "Cart ID", "cart-demo"),
                 ("cart_value", "Cart value", 1000.0),
                 ("currency", "Currency", "INR"),
@@ -368,14 +339,14 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
         st.caption(
             "Overdue-invoice cases require WhatsApp consent before Revora will "
             "negotiate. Check the box below to grant it immediately and trigger "
-            "the PTP message draft -> firewall -> send in one submission."
+            "the first PTP message draft."
         )
         _submit_form(
             "receivable",
             "Process receivable case",
             [
                 ("customer_id", "Customer ID", "customer-demo"),
-                ("customer_phone", "Customer WhatsApp number (e.g. +91XXXXXXXXXX)", ""),
+                ("customer_phone", "Customer phone (used only for the simulated chat below — no real message is sent)", "+919999999999"),
                 ("invoice_payment_ref", "Invoice/payment reference", "invoice-demo"),
                 ("amount", "Amount", 1000.0),
                 ("currency", "Currency", "INR"),
@@ -384,6 +355,70 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
             client=client,
             show_consent_toggle=True,
         )
+
+
+def _render_ptp_chat(case_id: str, *, st: Any, client: RevoraAPIClient) -> None:
+    """Simulated WhatsApp negotiation — entirely local, no Twilio account
+    or real message involved. The outbound leg still runs the real graph
+    pipeline (consent gate -> communication/Gemini draft -> trust firewall
+    -> execution) and the inbound leg runs the real
+    communication_node(mode="inbound") -> PTP state machine path; only the
+    actual network hop to a messaging provider is skipped.
+    """
+    st.markdown("#### 💬 Negotiation chat (simulated WhatsApp)")
+    st.caption(
+        "Runs the actual pipeline — Gemini drafts the message, the Trust "
+        "Firewall checks it, and your typed reply is parsed the same way a "
+        "real inbound message would be. Include an explicit date like "
+        "`2026-09-10` in your reply for the PTP date to be detected."
+    )
+
+    if not case_id.strip():
+        st.info("Enter a case ID above to start a negotiation.")
+        return
+
+    try:
+        response = client.get_case(case_id.strip())
+    except RevoraAPIError as exc:
+        st.error(str(exc))
+        return
+
+    state = response.get("state", {})
+    entry_point = state.get("entry_point")
+
+    if entry_point == "failure":
+        st.info("📵 Failure cases are resolved through retry, not messaging — there's no negotiation chat for this case.")
+        return
+
+    if st.button("▶️ Start / refresh negotiation", key=f"start_negotiation_{case_id}"):
+        if not state.get("contact_allowed"):
+            try:
+                consent_response = client.grant_consent(case_id.strip())
+                state = consent_response.get("state", state)
+            except RevoraAPIError as exc:
+                st.error(f"Could not start negotiation: {exc}")
+                return
+
+    status_cols = st.columns(3)
+    status_cols[0].metric("PTP state", state.get("ptp_state") or "—")
+    status_cols[1].metric("Promised date", state.get("promised_date") or "—")
+    status_cols[2].metric("Outcome", state.get("outcome") or "—")
+
+    history = state.get("conversation_history") or []
+    if not history:
+        st.caption("No messages yet — click \"Start / refresh negotiation\" to send the first reminder.")
+    for message in history:
+        role = "assistant" if message.get("direction") == "out" else "user"
+        with st.chat_message(role):
+            st.write(message.get("content", ""))
+
+    reply = st.chat_input("Type the customer's reply…", key=f"chat_input_{case_id}")
+    if reply:
+        try:
+            client.simulate_reply(case_id.strip(), reply)
+            st.rerun()
+        except RevoraAPIError as exc:
+            st.error(str(exc))
 
 
 def render_live_case_viewer(*, st: Any, client: RevoraAPIClient, default_case_ids: list[str]) -> None:
@@ -408,31 +443,7 @@ def render_live_case_viewer(*, st: Any, client: RevoraAPIClient, default_case_id
             st.error(str(exc))
 
     st.divider()
-    st.caption(
-        "Simulate an inbound WhatsApp reply — posts the same form-encoded "
-        "payload a real Twilio sandbox webhook would send, without needing "
-        "an active Twilio connection. Useful for demoing PTP state "
-        "transitions (PROMISED/KEPT/DISPUTED/ESCALATED) on demand."
-    )
-    reply_text = st.text_input(
-        "Customer reply text",
-        value="I will pay by 2026-09-10",
-        key="simulate_reply_text",
-    )
-    if st.button("Simulate inbound WhatsApp reply"):
-        if not case_id.strip():
-            st.warning("Enter a case ID first.")
-            return
-        try:
-            response = client.simulate_inbound_whatsapp(case_id.strip(), reply_text)
-            state = response.get("state")
-            st.success("Simulated reply processed.")
-            if isinstance(state, dict):
-                _render_case_state({"case_id": response.get("case_id", case_id.strip()), **state}, st=st)
-            else:
-                st.json(response)
-        except RevoraAPIError as exc:
-            st.error(str(exc))
+    _render_ptp_chat(case_id, st=st, client=client)
 
     st.divider()
     st.caption("Demo recovery: this records a payment-provider confirmation; it does not charge a customer.")

@@ -44,11 +44,33 @@ class GeminiClient:
         self.dry_run = dry_run
         self.http = http
 
+    @staticmethod
+    def _dry_run_message(prompt: str) -> str:
+        """Deterministic, content-aware stand-in for a live Gemini call.
+
+        Keeps local/offline demos free of any API key while still reflecting
+        the case's actual reference and amount (parsed out of the prompt
+        built by communication.py's build_message_prompt), so a dashboard
+        walkthrough shows a believable PTP-style reminder instead of a
+        fixed placeholder string. No network call, no cost, no external
+        dependency — purely local string construction.
+        """
+        reference_match = re.search(r"Reference:\s*([^.]+)\.", prompt)
+        amount_match = re.search(r"Amount:\s*INR\s*([0-9.,]+)", prompt)
+        reference = reference_match.group(1).strip() if reference_match else "your case"
+        amount = amount_match.group(1).strip() if amount_match else None
+        amount_clause = f" of INR {amount}" if amount else ""
+        return (
+            f"Hi! This is a reminder about {reference} — a pending amount{amount_clause}. "
+            "Could you share a date by which you can complete this payment? "
+            "You can also open your payment app directly. Reply STOP anytime to opt out."
+        )
+
     def _generate(self, prompt: str, *, response_mime_type: str | None = None) -> str:
         if not prompt or not prompt.strip():
             raise ValueError("prompt is required")
         if self.dry_run:
-            return "Namaste, Invoice reference ke liye payment timing confirm kar dijiye. Reply STOP anytime."
+            return self._dry_run_message(prompt)
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY is required for live LLM operations")
         generation_config: dict[str, Any] = {"temperature": 0.2, "maxOutputTokens": 512}

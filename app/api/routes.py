@@ -20,7 +20,6 @@ router = APIRouter(tags=["cases"])
 
 class FailureRequest(BaseModel):
     customer_id: str = Field(min_length=1)
-    customer_phone: str | None = None
     payment_id: str = Field(min_length=1)
     amount: Decimal = Field(ge=0)
     currency: str = "INR"
@@ -51,6 +50,10 @@ class ReceivableRequest(BaseModel):
 class ConsentRequest(BaseModel):
     consent: bool
     channel: str = "whatsapp"
+
+
+class SimulateReplyRequest(BaseModel):
+    reply: str = Field(min_length=1)
 
 
 def _graph(request: Request) -> Any:
@@ -117,7 +120,7 @@ def create_failure(payload: FailureRequest, request: Request) -> dict[str, Any]:
         event = FailureEvent(id=case_id, payment_id=payload.payment_id, gateway_code=payload.gateway_code, gateway_reason=payload.gateway_reason, amount=payload.amount, currency=payload.currency, method=payload.method, timestamp=now, customer_id=payload.customer_id, raw_payload=payload.model_dump_json())
         session.add(event)
         session.commit()
-        state = new_case_state(case_id=case_id, entry_point="failure", event_id=case_id, customer_id=payload.customer_id, customer_phone=payload.customer_phone, amount=payload.amount, currency=payload.currency, payment_id=payload.payment_id, gateway_code=payload.gateway_code, gateway_reason=payload.gateway_reason, method=payload.method, now=now)
+        state = new_case_state(case_id=case_id, entry_point="failure", event_id=case_id, customer_id=payload.customer_id, amount=payload.amount, currency=payload.currency, payment_id=payload.payment_id, gateway_code=payload.gateway_code, gateway_reason=payload.gateway_reason, method=payload.method, now=now)
         return {"status": "processed", **_invoke(request, state)}
     except Exception:
         session.rollback()
@@ -219,3 +222,26 @@ def update_consent(case_id: str, payload: ConsentRequest, request: Request) -> d
     graph.update_state(config, {"consent_flag": payload.consent, "consent_checked": True, "contact_allowed": payload.consent, "consent_reason": "consent updated through API", "pending_event": "consent_granted" if payload.consent else None, "outcome": None if payload.consent else "do_nothing", "outcome_reason": None if payload.consent else "consent revoked through API"})
     result = graph.invoke({}, config=config) if payload.consent else graph.get_state(config).values
     return {"case_id": case_id, "consent": payload.consent, "channel": payload.channel, "state": result}
+
+
+@router.post("/cases/{case_id}/simulate-reply")
+def simulate_reply(case_id: str, payload: SimulateReplyRequest, request: Request) -> dict[str, Any]:
+    """Dashboard-only helper for the negotiation chat simulator.
+
+    Feeds a typed customer reply into the graph exactly the way a real
+    inbound message would (same last_customer_reply / pending_event
+    mechanism the Twilio webhook uses in app/api/webhooks.py), but as a
+    plain JSON call with no messaging-provider payload shape, signature,
+    or account required. This exists purely so the dashboard can simulate
+    the full PTP negotiation loop (Gemini draft -> Trust Firewall ->
+    execution -> customer reply -> intent parsing -> PTP state machine)
+    entirely locally.
+    """
+    config = {"configurable": {"thread_id": case_id}}
+    graph = _graph(request)
+    snapshot = graph.get_state(config)
+    if not snapshot.values:
+        raise HTTPException(status_code=404, detail="case not found")
+    graph.update_state(config, {"last_customer_reply": payload.reply, "pending_event": "inbound_reply", "event_id": f"sim-{uuid.uuid4().hex[:8]}"})
+    result = graph.invoke({}, config=config)
+    return {"case_id": case_id, "state": result}
