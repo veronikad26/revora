@@ -20,6 +20,7 @@ router = APIRouter(tags=["cases"])
 
 class FailureRequest(BaseModel):
     customer_id: str = Field(min_length=1)
+    customer_phone: str | None = None
     payment_id: str = Field(min_length=1)
     amount: Decimal = Field(ge=0)
     currency: str = "INR"
@@ -30,6 +31,7 @@ class FailureRequest(BaseModel):
 
 class CheckoutRequest(BaseModel):
     customer_id: str
+    customer_phone: str | None = None
     cart_id: str
     cart_value: Decimal = Field(ge=0)
     currency: str = "INR"
@@ -40,6 +42,7 @@ class CheckoutRequest(BaseModel):
 
 class ReceivableRequest(BaseModel):
     customer_id: str
+    customer_phone: str | None = None
     invoice_payment_ref: str
     amount: Decimal = Field(ge=0)
     currency: str = "INR"
@@ -114,7 +117,7 @@ def create_failure(payload: FailureRequest, request: Request) -> dict[str, Any]:
         event = FailureEvent(id=case_id, payment_id=payload.payment_id, gateway_code=payload.gateway_code, gateway_reason=payload.gateway_reason, amount=payload.amount, currency=payload.currency, method=payload.method, timestamp=now, customer_id=payload.customer_id, raw_payload=payload.model_dump_json())
         session.add(event)
         session.commit()
-        state = new_case_state(case_id=case_id, entry_point="failure", event_id=case_id, customer_id=payload.customer_id, amount=payload.amount, currency=payload.currency, payment_id=payload.payment_id, gateway_code=payload.gateway_code, gateway_reason=payload.gateway_reason, method=payload.method, now=now)
+        state = new_case_state(case_id=case_id, entry_point="failure", event_id=case_id, customer_id=payload.customer_id, customer_phone=payload.customer_phone, amount=payload.amount, currency=payload.currency, payment_id=payload.payment_id, gateway_code=payload.gateway_code, gateway_reason=payload.gateway_reason, method=payload.method, now=now)
         return {"status": "processed", **_invoke(request, state)}
     except Exception:
         session.rollback()
@@ -134,13 +137,13 @@ def create_checkout(payload: CheckoutRequest, request: Request) -> dict[str, Any
         session.commit()
     finally:
         session.close()
-    state = new_case_state(case_id=case_id, entry_point="abandonment", event_id=case_id, customer_id=payload.customer_id, amount=payload.cart_value, currency=payload.currency, cart_id=payload.cart_id, cart_value=payload.cart_value, funnel_stage_reached=payload.funnel_stage_reached, last_activity_at=last_activity.isoformat(), prior_abandonment_count=payload.prior_abandonment_count, now=now)
+    state = new_case_state(case_id=case_id, entry_point="abandonment", event_id=case_id, customer_id=payload.customer_id, customer_phone=payload.customer_phone, amount=payload.cart_value, currency=payload.currency, cart_id=payload.cart_id, cart_value=payload.cart_value, funnel_stage_reached=payload.funnel_stage_reached, last_activity_at=last_activity.isoformat(), prior_abandonment_count=payload.prior_abandonment_count, now=now)
     return {"status": "processed", **_invoke(request, state)}
 
 
 @router.post("/cases/receivable", status_code=201)
 def create_receivable(payload: ReceivableRequest, request: Request) -> dict[str, Any]:
-    state = new_case_state(case_id=str(uuid.uuid4()), entry_point="receivable", customer_id=payload.customer_id, amount=payload.amount, currency=payload.currency, invoice_payment_ref=payload.invoice_payment_ref)
+    state = new_case_state(case_id=str(uuid.uuid4()), entry_point="receivable", customer_id=payload.customer_id, customer_phone=payload.customer_phone, amount=payload.amount, currency=payload.currency, invoice_payment_ref=payload.invoice_payment_ref)
     return {"status": "processed", **_invoke(request, state)}
 
 
