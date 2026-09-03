@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -84,6 +85,22 @@ def _case_id_from_response(response: dict[str, Any]) -> str | None:
     return str(case_id) if case_id else None
 
 
+def _new_demo_payment_id() -> str:
+    """A fresh, collision-free default for the Failure tab's Payment ID field.
+
+    create_failure() deliberately deduplicates on payment_id (so the same
+    real-world gateway failure event is never processed twice). That's
+    correct behavior, but it means a static default value like
+    "payment-demo" causes every *subsequent* submission where the user
+    didn't edit the field to hit the duplicate branch instead of creating
+    a fresh, freshly-checkpointed case. Randomizing the default after each
+    submission keeps casual repeat testing collision-free while still
+    letting a user intentionally re-use a Payment ID to exercise the
+    dedup path if they want to.
+    """
+    return f"payment-demo-{uuid.uuid4().hex[:8]}"
+
+
 def _render_case_state(state: dict[str, Any], *, st: Any) -> None:
     """Render the operational fields returned by either POST or GET /cases/{id}."""
     st.subheader(f"Case {state.get('case_id', 'unknown')}")
@@ -148,6 +165,7 @@ def _submit_form(
     st: Any,
     client: RevoraAPIClient,
     transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    on_response: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     with st.form(f"submit_{entry_point}_form", clear_on_submit=False):
         values: dict[str, Any] = {}
@@ -172,12 +190,25 @@ def _submit_form(
                 # typed (Streamlit widget state otherwise "owns" the value
                 # once the widget has rendered once with a `key`).
                 st.session_state["live_case_id"] = case_id
-            st.success(f"{entry_point.title()} case processed: {case_id or 'response received'}")
+
+            status = response.get("status")
+            if status == "duplicate":
+                note = response.get("note")
+                message = f"{entry_point.title()} case with this identifier already exists: {case_id}."
+                if note:
+                    message += f" {note}"
+                st.warning(message)
+            else:
+                st.success(f"{entry_point.title()} case processed: {case_id or 'response received'}")
+
             state = response.get("state")
             if isinstance(state, dict):
                 _render_case_state({"case_id": case_id, **state}, st=st)
             else:
                 st.json(response)
+
+            if on_response:
+                on_response(response)
         except RevoraAPIError as exc:
             st.error(str(exc))
 
@@ -188,12 +219,22 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
     failure, checkout, receivable = st.tabs(["Failure", "Checkout abandonment", "Receivable"])
 
     with failure:
+        # Seed a unique default once per session so the very first
+        # submission doesn't collide with anyone else's earlier testing.
+        if "failure_payment_id" not in st.session_state:
+            st.session_state["failure_payment_id"] = _new_demo_payment_id()
+        st.caption(
+            "Payment ID is deduplicated server-side — resubmitting the same "
+            "value returns the original case instead of creating a new one. "
+            "The default below is regenerated after every submission so "
+            "repeat testing doesn't accidentally collide."
+        )
         _submit_form(
             "failure",
             "Process failure case",
             [
                 ("customer_id", "Customer ID", "customer-demo"),
-                ("payment_id", "Payment ID", "payment-demo"),
+                ("payment_id", "Payment ID", st.session_state["failure_payment_id"]),
                 ("amount", "Amount", 1000.0),
                 ("currency", "Currency", "INR"),
                 ("method", "Payment method", "upi"),
@@ -202,6 +243,9 @@ def render_case_submission_forms(*, st: Any, client: RevoraAPIClient) -> None:
             ],
             st=st,
             client=client,
+            on_response=lambda _response: st.session_state.update(
+                {"failure_payment_id": _new_demo_payment_id()}
+            ),
         )
 
     with checkout:

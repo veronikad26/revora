@@ -63,6 +63,21 @@ def _invoke(request: Request, state: dict[str, Any]) -> dict[str, Any]:
     return {"case_id": case_id, "state": result}
 
 
+def _existing_case_state(request: Request, case_id: str) -> dict[str, Any] | None:
+    """Look up a case's live checkpointed state, or None if it has no checkpoint.
+
+    A row existing in the SQL database (FailureEvent, CheckoutEvent, ...) does
+    NOT imply a LangGraph checkpoint exists for that case_id -- those are two
+    independent persistence layers (see app/config.py::LANGGRAPH_CHECKPOINT_PATH).
+    A case can end up with a DB row but no reachable checkpoint if, for
+    example, it was originally created while the API was running with the
+    in-memory MemorySaver and the process has since restarted.
+    """
+    config = {"configurable": {"thread_id": case_id}}
+    snapshot = _graph(request).get_state(config)
+    return dict(snapshot.values) if snapshot.values else None
+
+
 @router.get("/health", tags=["system"])
 def health(request: Request) -> dict[str, Any]:
     return {"status": "ok", "graph_ready": getattr(request.app.state, "graph", None) is not None}
@@ -74,7 +89,26 @@ def create_failure(payload: FailureRequest, request: Request) -> dict[str, Any]:
     try:
         existing = session.query(FailureEvent).filter_by(payment_id=payload.payment_id).one_or_none()
         if existing:
-            return {"status": "duplicate", "case_id": existing.id, "event_id": existing.id}
+            # payment_id is deliberately deduplicated (PRD idempotency
+            # requirement) so the same real-world gateway failure event is
+            # never processed twice. That must not leave the caller holding
+            # a case_id it can never fetch state for: look up the existing
+            # case's live checkpoint (the same mechanism GET /cases/{id}
+            # uses) instead of returning no state at all.
+            state = _existing_case_state(request, existing.id)
+            return {
+                "status": "duplicate",
+                "case_id": existing.id,
+                "event_id": existing.id,
+                "state": state,
+                "note": None if state is not None else (
+                    "payment_id already exists but no live checkpoint was found for "
+                    "this case (it may have been created before the current "
+                    "checkpoint store, or the checkpoint store was reset). "
+                    "Submit with a different Payment ID to create a fresh, "
+                    "checkpointed case."
+                ),
+            }
         case_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         event = FailureEvent(id=case_id, payment_id=payload.payment_id, gateway_code=payload.gateway_code, gateway_reason=payload.gateway_reason, amount=payload.amount, currency=payload.currency, method=payload.method, timestamp=now, customer_id=payload.customer_id, raw_payload=payload.model_dump_json())
