@@ -54,6 +54,7 @@ class CheckoutRequest(BaseModel):
     customer_id: str
     customer_phone: str | None = None
     cart_id: str
+    consent: bool = False
     cart_value: Decimal = Field(ge=0)
     currency: str = "INR"
     funnel_stage_reached: str = "payment"
@@ -65,6 +66,7 @@ class ReceivableRequest(BaseModel):
     customer_id: str
     customer_phone: str | None = None
     invoice_payment_ref: str
+    consent: bool = False
     amount: Decimal = Field(ge=0)
     currency: str = "INR"
 
@@ -86,21 +88,52 @@ def _graph(request: Request) -> Any:
 
 
 def _invoke(request: Request, state: dict[str, Any]) -> dict[str, Any]:
-    """Run one case through the compiled graph.
+    """Run one case through the compiled graph."""
 
-    Wrapped in the process-wide _GRAPH_LOCK (see comment above) and in a
-    try/except that surfaces the real exception message via HTTPException's
-    `detail` field instead of an opaque 500 with no information, and logs
-    the full traceback server-side.
-    """
     case_id = state["case_id"]
+
     try:
         with _GRAPH_LOCK:
-            result = _graph(request).invoke(state, config={"configurable": {"thread_id": case_id}})
-    except Exception as exc:  # noqa: BLE001 - intentionally broad: this is the single graph entry point
-        logger.exception("graph.invoke failed for case_id=%s", case_id)
-        raise HTTPException(status_code=500, detail=f"case processing failed: {exc!r}") from exc
-    return {"case_id": case_id, "state": result}
+            result = _graph(request).invoke(
+                state,
+                config={
+                    "configurable": {
+                        "thread_id": case_id,
+                    },
+                    "recursion_limit": 100,
+                },
+            )
+
+    except Exception as exc:
+        logger.exception(
+            "graph.invoke failed for case_id=%s",
+            case_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"case processing failed: {exc!r}",
+        ) from exc
+
+    return {
+        "case_id": case_id,
+        "state": result,
+    }
+
+
+def _persist_consent(customer_id: str, channel: str, consent: bool) -> None:
+    session = SessionLocal()
+    try:
+        record = session.query(ConsentFlag).filter_by(customer_id=customer_id, channel=channel).one_or_none()
+        if record is None:
+            session.add(ConsentFlag(id=str(uuid.uuid4()), customer_id=customer_id, channel=channel, consent=consent))
+        else:
+            record.consent = consent
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"could not save consent: {exc!r}") from exc
+    finally:
+        session.close()
 
 
 def _existing_case_state(request: Request, case_id: str) -> dict[str, Any] | None:
@@ -168,6 +201,7 @@ def create_failure(payload: FailureRequest, request: Request) -> dict[str, Any]:
 
 @router.post("/cases/checkout", status_code=201)
 def create_checkout(payload: CheckoutRequest, request: Request) -> dict[str, Any]:
+    logger.info("received checkout case: customer_id=%s cart_id=%s", payload.customer_id, payload.cart_id)
     case_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     last_activity = payload.last_activity_at or now
@@ -181,13 +215,23 @@ def create_checkout(payload: CheckoutRequest, request: Request) -> dict[str, Any
         raise HTTPException(status_code=500, detail=f"could not save checkout event: {exc!r}") from exc
     finally:
         session.close()
+    if payload.consent:
+        _persist_consent(payload.customer_id, "whatsapp", True)
     state = new_case_state(case_id=case_id, entry_point="abandonment", event_id=case_id, customer_id=payload.customer_id, customer_phone=payload.customer_phone, amount=payload.cart_value, currency=payload.currency, cart_id=payload.cart_id, cart_value=payload.cart_value, funnel_stage_reached=payload.funnel_stage_reached, last_activity_at=last_activity.isoformat(), prior_abandonment_count=payload.prior_abandonment_count, now=now)
+    if payload.consent:
+        state["consent_flag"] = True
     return {"status": "processed", **_invoke(request, state)}
 
 
 @router.post("/cases/receivable", status_code=201)
 def create_receivable(payload: ReceivableRequest, request: Request) -> dict[str, Any]:
-    state = new_case_state(case_id=str(uuid.uuid4()), entry_point="receivable", customer_id=payload.customer_id, customer_phone=payload.customer_phone, amount=payload.amount, currency=payload.currency, invoice_payment_ref=payload.invoice_payment_ref)
+    logger.info("received receivable case: customer_id=%s invoice_payment_ref=%s", payload.customer_id, payload.invoice_payment_ref)
+    case_id = str(uuid.uuid4())
+    if payload.consent:
+        _persist_consent(payload.customer_id, "whatsapp", True)
+    state = new_case_state(case_id=case_id, entry_point="receivable", event_id=case_id, customer_id=payload.customer_id, customer_phone=payload.customer_phone, amount=payload.amount, currency=payload.currency, invoice_payment_ref=payload.invoice_payment_ref)
+    if payload.consent:
+        state["consent_flag"] = True
     return {"status": "processed", **_invoke(request, state)}
 
 
@@ -273,15 +317,26 @@ def update_consent(case_id: str, payload: ConsentRequest, request: Request) -> d
         session.close()
     graph = _graph(request)
     try:
+        consent_update = {
+            "consent_flag": payload.consent,
+            "consent_checked": True,
+            "contact_allowed": payload.consent,
+            "consent_reason": "consent updated through API",
+            "pending_event": "consent_granted" if payload.consent else None,
+            "outcome": None if payload.consent else "do_nothing",
+            "outcome_reason": None if payload.consent else "consent revoked through API",
+        }
         with _GRAPH_LOCK:
-            graph.update_state(config, {"consent_flag": payload.consent, "consent_checked": True, "contact_allowed": payload.consent, "consent_reason": "consent updated through API", "pending_event": "consent_granted" if payload.consent else None, "outcome": None if payload.consent else "do_nothing", "outcome_reason": None if payload.consent else "consent revoked through API"})
             if payload.consent:
-                # ``consent_granted`` is a one-shot graph entry event. Clear it after
-                # the single consent-triggered outbound run; otherwise any later
-                # invocation of this checkpoint re-enters recovery_router -> consent
-                # gate -> communication and can generate/send the same message again.
-                graph.invoke({}, config=config)
-                graph.update_state(config, {"pending_event": None})
+                # Pass the consent event as the input to the single graph run.
+                # Calling update_state() and then invoke() back-to-back causes
+                # LangGraph's SQLite checkpointer to wait on its own queued
+                # checkpoint write, leaving checkout/receivable requests stuck.
+                # The one-shot pending_event is cleared by the graph's terminal
+                # state update, so later refreshes cannot resend the message.
+                graph.invoke(consent_update, config=config)
+            else:
+                graph.update_state(config, consent_update)
             result = graph.get_state(config).values
     except Exception as exc:  # noqa: BLE001
         logger.exception("consent-triggered graph run failed for case_id=%s", case_id)

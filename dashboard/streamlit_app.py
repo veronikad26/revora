@@ -12,6 +12,7 @@ import requests
 
 
 DEFAULT_API_URL = "http://localhost:8000"
+DEFAULT_API_TIMEOUT_SECONDS = 60.0
 
 
 class RevoraAPIError(RuntimeError):
@@ -21,9 +22,20 @@ class RevoraAPIError(RuntimeError):
 class RevoraAPIClient:
     """Small requests-based client for the local Revora API."""
 
-    def __init__(self, base_url: str | None = None, *, timeout: float = 10.0) -> None:
+    def __init__(self, base_url: str | None = None, *, timeout: float | None = None) -> None:
         self.base_url = (base_url or os.getenv("REVORA_API_URL", DEFAULT_API_URL)).rstrip("/")
-        self.timeout = timeout
+        configured_timeout = os.getenv("REVORA_API_CLIENT_TIMEOUT_SECONDS")
+        if timeout is not None:
+            self.timeout = float(timeout)
+        elif configured_timeout:
+            try:
+                self.timeout = float(configured_timeout)
+            except ValueError as exc:
+                raise ValueError("REVORA_API_CLIENT_TIMEOUT_SECONDS must be a number") from exc
+        else:
+            self.timeout = DEFAULT_API_TIMEOUT_SECONDS
+        if self.timeout <= 0:
+            raise ValueError("API request timeout must be greater than zero")
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:
@@ -34,6 +46,11 @@ class RevoraAPIClient:
                 **kwargs,
             )
             response.raise_for_status()
+        except requests.Timeout as exc:
+            raise RevoraAPIError(
+                f"{method} {path} timed out after {self.timeout:g}s; "
+                "the API may still be processing the case. Check the API log or refresh the case."
+            ) from exc
         except requests.RequestException as exc:
             detail = ""
             response = getattr(exc, "response", None)
@@ -209,12 +226,33 @@ def _submit_form(
     with st.form(f"submit_{entry_point}_form", clear_on_submit=False):
         values: dict[str, Any] = {}
         for name, field_label, default in fields:
+            widget_key = f"{entry_point}_{name}"
+            # Streamlit rejects a widget configuration that supplies both a
+            # `value=` default and an already-populated session-state value.
+            # This occurs for failure_payment_id because it is initialized
+            # before the text input is rendered and then reused on reruns.
+            # Let session state own the value after first creation.
+            has_session_value = widget_key in st.session_state
             if isinstance(default, int):
-                values[name] = st.number_input(field_label, min_value=0, value=default, step=1, key=f"{entry_point}_{name}")
+                kwargs = {"min_value": 0, "step": 1, "key": widget_key}
+                if not has_session_value:
+                    kwargs["value"] = default
+                values[name] = st.number_input(field_label, **kwargs)
             elif isinstance(default, float):
-                values[name] = st.number_input(field_label, min_value=0.0, value=default, step=0.01, format="%.2f", key=f"{entry_point}_{name}")
+                kwargs = {
+                    "min_value": 0.0,
+                    "step": 0.01,
+                    "format": "%.2f",
+                    "key": widget_key,
+                }
+                if not has_session_value:
+                    kwargs["value"] = default
+                values[name] = st.number_input(field_label, **kwargs)
             else:
-                values[name] = st.text_input(field_label, value=default, key=f"{entry_point}_{name}")
+                kwargs = {"key": widget_key}
+                if not has_session_value:
+                    kwargs["value"] = default
+                values[name] = st.text_input(field_label, **kwargs)
 
         grant_consent = False
         if show_consent_toggle:
@@ -228,43 +266,84 @@ def _submit_form(
 
     if submitted:
         try:
-            payload = transform(dict(values)) if transform else values
-            response = client.submit_case(entry_point, payload)
+            # Build a fresh payload so that Streamlit's form values are not
+            # mutated accidentally.
+            payload = dict(values)
+
+            # Checkout and receivable have a consent checkbox.
+            # The checkbox value must be sent to FastAPI as part of the
+            # initial case request. Previously, grant_consent was collected
+            # by the UI but never added to the API payload.
+            if show_consent_toggle:
+                payload["consent"] = grant_consent
+
+            # Apply any case-specific payload transformation after adding
+            # the consent value.
+            if transform:
+                payload = transform(payload)
+
+            # Do not issue a follow-up consent graph request from inside the
+            # same form submission. The initial case POST must return first;
+            # immediately starting a second LangGraph run can block on the
+            # previous checkpoint flush and freeze Streamlit.
+            response = client.submit_case(
+                entry_point,
+                payload,
+            )
+
             case_id = _case_id_from_response(response)
+
             if case_id:
                 st.session_state["last_case_id"] = case_id
-                # Force the live-case-id widget to pick up the new id on
-                # next render instead of keeping whatever the user last
-                # typed (Streamlit widget state otherwise "owns" the value
-                # once the widget has rendered once with a `key`).
+
+                # Force the live-case-id widget to pick up the new ID on
+                # the next render instead of keeping whatever the user last
+                # typed. Streamlit widget state otherwise "owns" the value
+                # once the widget has rendered once with a key.
                 st.session_state["live_case_id"] = case_id
 
             status = response.get("status")
+
             if status == "duplicate":
                 note = response.get("note")
-                message = f"{entry_point.title()} case with this identifier already exists: {case_id}."
+
+                message = (
+                    f"{entry_point.title()} case with this identifier "
+                    f"already exists: {case_id}."
+                )
+
                 if note:
                     message += f" {note}"
+
                 st.warning(message)
+
             else:
-                st.success(f"{entry_point.title()} case processed: {case_id or 'response received'}")
+                st.success(
+                    f"{entry_point.title()} case processed: "
+                    f"{case_id or 'response received'}"
+                )
 
             state = response.get("state")
 
+            # Consent is now submitted together with the initial case POST,
+            # so do not trigger another graph invocation here.
             if show_consent_toggle and grant_consent and case_id:
-                try:
-                    consent_response = client.grant_consent(case_id)
-                    consent_state = consent_response.get("state")
-                    if isinstance(consent_state, dict):
-                        state = consent_state
-                        st.success("Consent granted — first PTP/nudge message drafted and (dry-run) sent. Open the negotiation chat below to continue.")
-                except RevoraAPIError as exc:
-                    st.error(f"Consent grant failed: {exc}")
+                st.info(
+                    "Customer consent was included with the case. "
+                    "The case is ready for the communication/negotiation flow."
+                )
 
             if isinstance(state, dict):
-                _render_case_state({"case_id": case_id, **state}, st=st)
+                _render_case_state(
+                    {
+                        "case_id": case_id,
+                        **state,
+                    },
+                    st=st,
+                )
             else:
                 st.json(response)
+
         except RevoraAPIError as exc:
             st.error(str(exc))
 
