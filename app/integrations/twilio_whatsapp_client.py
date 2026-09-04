@@ -46,7 +46,9 @@ class TwilioWhatsAppClient:
             raise ValueError("recipient phone number is required")
         if not body or not body.strip():
             raise ValueError("message body is required")
-        if re.search(r"https?://|www\\.", body, re.I):
+        # FIX: was r"https?://|www\\." — two literal backslashes + "." in a
+        # raw string, so a bare "www." link would never actually be caught.
+        if re.search(r"https?://|www\.", body, re.I):
             raise ValueError("payment or clickable links are not allowed in WhatsApp messages")
         recipient = self._whatsapp_address(to)
         if self.dry_run:

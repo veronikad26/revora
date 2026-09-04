@@ -19,7 +19,10 @@ def evaluate_message(content: str, state: RecoveryState | None = None)->Firewall
     text=content or ""
     lowered=text.casefold()
     checks=[]
-    if re.search(r"https?://|www\\.", text, re.I):
+    # FIX: was r"https?://|www\\." which is TWO literal backslashes + "." in
+    # a raw string and therefore NEVER matched "www." — links slipped past
+    # this check unnoticed for any message that used a bare "www." prefix.
+    if re.search(r"https?://|www\.", text, re.I):
         return FirewallResult(False,"contains non-whitelisted link",("link",))
     if any(term in lowered for term in ("immediately","last chance","account will be suspended")):
         return FirewallResult(False,"contains urgency or threat language",("urgency",))

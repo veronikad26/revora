@@ -56,7 +56,13 @@ class GeminiClient:
         dependency — purely local string construction.
         """
         reference_match = re.search(r"Reference:\s*([^.]+)\.", prompt)
-        amount_match = re.search(r"Amount:\s*INR\s*([0-9.,]+)", prompt)
+        # FIX: the previous pattern `[0-9.,]+` was greedy and swallowed the
+        # sentence-terminating period after the amount (e.g. captured
+        # "1000.0." instead of "1000.0"), which then leaked a trailing
+        # period into the generated message and the amount_clause. Anchor
+        # on digits, with optional decimal groups, and stop before the
+        # literal ". Action:" that always follows in build_message_prompt.
+        amount_match = re.search(r"Amount:\s*INR\s*([0-9][0-9,]*(?:\.[0-9]+)?)", prompt)
         reference = reference_match.group(1).strip() if reference_match else "your case"
         amount = amount_match.group(1).strip() if amount_match else None
         amount_clause = f" of INR {amount}" if amount else ""

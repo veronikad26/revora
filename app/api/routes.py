@@ -1,6 +1,8 @@
 """General case and state-inspection routes for Phase 8."""
 from __future__ import annotations
 
+import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -16,6 +18,26 @@ from app.models.consent_flag import ConsentFlag
 from app.models.failure_event import FailureEvent
 
 router = APIRouter(tags=["cases"])
+logger = logging.getLogger("revora.api")
+
+# Serializes every graph.invoke()/update_state() call process-wide.
+#
+# Why this exists: a checkout/receivable case is the ONLY kind of case that
+# runs the Consent Gate -> Communication -> Trust Firewall chain (failure/
+# retry cases skip straight to Policy Engine), so it drives roughly twice as
+# many LangGraph checkpoint writes per request as a failure case. Those
+# checkpoint writes go to revora_checkpoints.db via LangGraph's SqliteSaver,
+# while ordinary case rows (FailureEvent/CheckoutEvent/ConsentFlag/...) go
+# to a SEPARATE connection on revora.db via SQLAlchemy's SessionLocal --
+# two independent sqlite3 connections with `check_same_thread=False` and no
+# coordination between them. Under FastAPI's threadpool (every sync route
+# handler runs on its own worker thread) this is a textbook recipe for
+# `sqlite3.OperationalError: database is locked` on Windows, and it shows
+# up almost exclusively on checkout/receivable because of the extra node
+# traffic. A single process-wide lock around every graph run removes the
+# contention entirely; for a single-operator dashboard/demo app this has no
+# meaningful throughput cost.
+_GRAPH_LOCK = threading.Lock()
 
 
 class FailureRequest(BaseModel):
@@ -64,8 +86,20 @@ def _graph(request: Request) -> Any:
 
 
 def _invoke(request: Request, state: dict[str, Any]) -> dict[str, Any]:
+    """Run one case through the compiled graph.
+
+    Wrapped in the process-wide _GRAPH_LOCK (see comment above) and in a
+    try/except that surfaces the real exception message via HTTPException's
+    `detail` field instead of an opaque 500 with no information, and logs
+    the full traceback server-side.
+    """
     case_id = state["case_id"]
-    result = _graph(request).invoke(state, config={"configurable": {"thread_id": case_id}})
+    try:
+        with _GRAPH_LOCK:
+            result = _graph(request).invoke(state, config={"configurable": {"thread_id": case_id}})
+    except Exception as exc:  # noqa: BLE001 - intentionally broad: this is the single graph entry point
+        logger.exception("graph.invoke failed for case_id=%s", case_id)
+        raise HTTPException(status_code=500, detail=f"case processing failed: {exc!r}") from exc
     return {"case_id": case_id, "state": result}
 
 
@@ -80,7 +114,8 @@ def _existing_case_state(request: Request, case_id: str) -> dict[str, Any] | Non
     in-memory MemorySaver and the process has since restarted.
     """
     config = {"configurable": {"thread_id": case_id}}
-    snapshot = _graph(request).get_state(config)
+    with _GRAPH_LOCK:
+        snapshot = _graph(request).get_state(config)
     return dict(snapshot.values) if snapshot.values else None
 
 
@@ -122,6 +157,8 @@ def create_failure(payload: FailureRequest, request: Request) -> dict[str, Any]:
         session.commit()
         state = new_case_state(case_id=case_id, entry_point="failure", event_id=case_id, customer_id=payload.customer_id, amount=payload.amount, currency=payload.currency, payment_id=payload.payment_id, gateway_code=payload.gateway_code, gateway_reason=payload.gateway_reason, method=payload.method, now=now)
         return {"status": "processed", **_invoke(request, state)}
+    except HTTPException:
+        raise
     except Exception:
         session.rollback()
         raise
@@ -138,6 +175,10 @@ def create_checkout(payload: CheckoutRequest, request: Request) -> dict[str, Any
     try:
         session.add(CheckoutEvent(id=case_id, cart_id=payload.cart_id, customer_id=payload.customer_id, cart_value=payload.cart_value, currency=payload.currency, funnel_stage_reached=payload.funnel_stage_reached, created_at=now, last_activity_at=last_activity, prior_abandonment_count=payload.prior_abandonment_count, updated_at=now))
         session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.exception("failed to persist CheckoutEvent for case_id=%s", case_id)
+        raise HTTPException(status_code=500, detail=f"could not save checkout event: {exc!r}") from exc
     finally:
         session.close()
     state = new_case_state(case_id=case_id, entry_point="abandonment", event_id=case_id, customer_id=payload.customer_id, customer_phone=payload.customer_phone, amount=payload.cart_value, currency=payload.currency, cart_id=payload.cart_id, cart_value=payload.cart_value, funnel_stage_reached=payload.funnel_stage_reached, last_activity_at=last_activity.isoformat(), prior_abandonment_count=payload.prior_abandonment_count, now=now)
@@ -153,7 +194,8 @@ def create_receivable(payload: ReceivableRequest, request: Request) -> dict[str,
 @router.get("/cases/{case_id}")
 def get_case(case_id: str, request: Request) -> dict[str, Any]:
     config = {"configurable": {"thread_id": case_id}}
-    snapshot = _graph(request).get_state(config)
+    with _GRAPH_LOCK:
+        snapshot = _graph(request).get_state(config)
     if not snapshot.values:
         raise HTTPException(status_code=404, detail="case not found")
     return {"case_id": case_id, "state": snapshot.values}
@@ -169,41 +211,48 @@ def confirm_payment(case_id: str, request: Request) -> dict[str, Any]:
     """
     config = {"configurable": {"thread_id": case_id}}
     graph = _graph(request)
-    snapshot = graph.get_state(config)
-    if not snapshot.values:
-        raise HTTPException(status_code=404, detail="case not found")
+    with _GRAPH_LOCK:
+        snapshot = graph.get_state(config)
+        if not snapshot.values:
+            raise HTTPException(status_code=404, detail="case not found")
 
-    state = snapshot.values
-    now = datetime.now(timezone.utc).isoformat()
-    audit_event = {
-        "action": "payment_confirmed",
-        "actor": "payment_provider",
-        "entity_type": "case",
-        "entity_id": case_id,
-        "reason": "external payment confirmation received",
-        "customer_visible_reason": None,
-        "timestamp": now,
-    }
-    graph.update_state(
-        config,
-        {
-            "payment_confirmed": True,
-            "ptp_state": "KEPT",
-            "outcome": "recovered",
-            "outcome_reason": "payment confirmed by provider",
-            "recovered_amount": state.get("amount"),
-            "execution_result": "payment_confirmed",
-            "audit_trail": [audit_event],
-            "updated_at": now,
-        },
-    )
-    return {"case_id": case_id, "state": graph.get_state(config).values}
+        state = snapshot.values
+        now = datetime.now(timezone.utc).isoformat()
+        audit_event = {
+            "action": "payment_confirmed",
+            "actor": "payment_provider",
+            "entity_type": "case",
+            "entity_id": case_id,
+            "reason": "external payment confirmation received",
+            "customer_visible_reason": None,
+            "timestamp": now,
+        }
+        try:
+            graph.update_state(
+                config,
+                {
+                    "payment_confirmed": True,
+                    "ptp_state": "KEPT",
+                    "outcome": "recovered",
+                    "outcome_reason": "payment confirmed by provider",
+                    "recovered_amount": state.get("amount"),
+                    "execution_result": "payment_confirmed",
+                    "audit_trail": [audit_event],
+                    "updated_at": now,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("confirm-payment failed for case_id=%s", case_id)
+            raise HTTPException(status_code=500, detail=f"confirm-payment failed: {exc!r}") from exc
+        result = graph.get_state(config).values
+    return {"case_id": case_id, "state": result}
 
 
 @router.post("/cases/{case_id}/consent")
 def update_consent(case_id: str, payload: ConsentRequest, request: Request) -> dict[str, Any]:
     config = {"configurable": {"thread_id": case_id}}
-    snapshot = _graph(request).get_state(config)
+    with _GRAPH_LOCK:
+        snapshot = _graph(request).get_state(config)
     if not snapshot.values:
         raise HTTPException(status_code=404, detail="case not found")
     customer_id = snapshot.values["customer_id"]
@@ -216,20 +265,27 @@ def update_consent(case_id: str, payload: ConsentRequest, request: Request) -> d
         else:
             record.consent = payload.consent
         session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.exception("failed to persist ConsentFlag for case_id=%s", case_id)
+        raise HTTPException(status_code=500, detail=f"could not save consent: {exc!r}") from exc
     finally:
         session.close()
     graph = _graph(request)
-    graph.update_state(config, {"consent_flag": payload.consent, "consent_checked": True, "contact_allowed": payload.consent, "consent_reason": "consent updated through API", "pending_event": "consent_granted" if payload.consent else None, "outcome": None if payload.consent else "do_nothing", "outcome_reason": None if payload.consent else "consent revoked through API"})
-    if payload.consent:
-        # ``consent_granted`` is a one-shot graph entry event. Clear it after
-        # the single consent-triggered outbound run; otherwise any later
-        # invocation of this checkpoint re-enters recovery_router -> consent
-        # gate -> communication and can generate/send the same message again.
-        graph.invoke({}, config=config)
-        graph.update_state(config, {"pending_event": None})
-        result = graph.get_state(config).values
-    else:
-        result = graph.get_state(config).values
+    try:
+        with _GRAPH_LOCK:
+            graph.update_state(config, {"consent_flag": payload.consent, "consent_checked": True, "contact_allowed": payload.consent, "consent_reason": "consent updated through API", "pending_event": "consent_granted" if payload.consent else None, "outcome": None if payload.consent else "do_nothing", "outcome_reason": None if payload.consent else "consent revoked through API"})
+            if payload.consent:
+                # ``consent_granted`` is a one-shot graph entry event. Clear it after
+                # the single consent-triggered outbound run; otherwise any later
+                # invocation of this checkpoint re-enters recovery_router -> consent
+                # gate -> communication and can generate/send the same message again.
+                graph.invoke({}, config=config)
+                graph.update_state(config, {"pending_event": None})
+            result = graph.get_state(config).values
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("consent-triggered graph run failed for case_id=%s", case_id)
+        raise HTTPException(status_code=500, detail=f"consent update failed: {exc!r}") from exc
     return {"case_id": case_id, "consent": payload.consent, "channel": payload.channel, "state": result}
 
 
@@ -248,9 +304,16 @@ def simulate_reply(case_id: str, payload: SimulateReplyRequest, request: Request
     """
     config = {"configurable": {"thread_id": case_id}}
     graph = _graph(request)
-    snapshot = graph.get_state(config)
-    if not snapshot.values:
-        raise HTTPException(status_code=404, detail="case not found")
-    graph.update_state(config, {"last_customer_reply": payload.reply, "pending_event": "inbound_reply", "event_id": f"sim-{uuid.uuid4().hex[:8]}"})
-    result = graph.invoke({}, config=config)
+    try:
+        with _GRAPH_LOCK:
+            snapshot = graph.get_state(config)
+            if not snapshot.values:
+                raise HTTPException(status_code=404, detail="case not found")
+            graph.update_state(config, {"last_customer_reply": payload.reply, "pending_event": "inbound_reply", "event_id": f"sim-{uuid.uuid4().hex[:8]}"})
+            result = graph.invoke({}, config=config)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("simulate-reply failed for case_id=%s", case_id)
+        raise HTTPException(status_code=500, detail=f"simulate-reply failed: {exc!r}") from exc
     return {"case_id": case_id, "state": result}
