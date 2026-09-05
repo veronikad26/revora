@@ -9,7 +9,8 @@ from app.graph.state import RecoveryState
 from app.integrations.gemini_client import CustomerIntent, GeminiClient
 from app.rules.consent_store import record_opt_out
 from app.rules.ptp_state_machine import mark_kept, on_inbound_reply
-
+from app.graph.nodes.trust_firewall import trust_firewall_node
+from app.config import MAX_CUSTOMER_CONTACTS, OPT_OUT_KEYWORDS, TRUST_FIREWALL_MAX_REGENERATIONS
 
 OUTBOUND_ACTIONS = {"notify", "nudge", "negotiate"}
 
@@ -147,7 +148,7 @@ def communication_node(
     *,
     mode: str = "outbound",
     gemini_client: GeminiClient | None = None,
-    firewall: Callable[..., dict[str, Any]] | None = None,
+    firewall: Callable[..., dict[str, Any]] = trust_firewall_node,
     session: Any | None = None,
 ) -> dict[str, Any]:
     """Generate or parse communication without granting execution authority."""
@@ -178,9 +179,27 @@ def communication_node(
         }
 
     draft = client.generate_message(build_message_prompt(state))
+    firewall_update = firewall(state, message=draft)
+
+    if firewall_update.get("trust_firewall_result") == "blocked":
+        state_for_retry = dict(state)
+        state_for_retry["trust_firewall_regenerations"] = firewall_update.get(
+            "trust_firewall_regenerations", 0
+        )
+        if state_for_retry["trust_firewall_regenerations"] <= TRUST_FIREWALL_MAX_REGENERATIONS:
+            draft = client.generate_message(build_message_prompt(state, corrective=True))
+            firewall_update = firewall(state_for_retry, message=draft)
+
+    if firewall_update.get("trust_firewall_result") != "pass":
+        return {
+            **firewall_update,
+            "proposed_action": "escalate",
+            "execution_result": "communication_blocked_by_trust_firewall",
+        }
 
     return {
         "draft_message": draft,
+        **firewall_update,
         "conversation_history": [
             {
                 "direction": "out",
